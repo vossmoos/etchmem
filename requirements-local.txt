@@ -1,0 +1,4 @@
+# Optional extras for the local (offline) embedding backend.
+# Install only if EMBEDDING_PROVIDER=local
+# pip install -r requirements.txt -r requirements-local.txt
+sentence-transformers>=3.0.0

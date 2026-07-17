@@ -1,0 +1,26 @@
+# Sales extension — extra properties the extractor should look for.
+# Each becomes a normal claim → etch, queryable as entity.<property>.
+# Additive only: it never changes the core (entity, property, value) triple.
+#
+# Edit / add files here, then restart the server (or re-create the extractor)
+# to pick up changes. Override the folder with ETCHMEM_EXT_DIR.
+domain: sales
+properties:
+  - name: sales_intent
+    description: How strongly the subject signals intent to purchase.
+    values: [none, low, medium, high]
+    entity_types: [company, person]
+
+  - name: budget_status
+    description: Funding state of the opportunity.
+    values: [unknown, unfunded, allocated, approved]
+    entity_types: [company]
+
+  - name: decision_maker
+    description: Named person who owns the buying decision.
+    entity_types: [company]
+
+  - name: churn_risk
+    description: Likelihood the customer leaves or does not renew.
+    values: [low, medium, high]
+    entity_types: [company]

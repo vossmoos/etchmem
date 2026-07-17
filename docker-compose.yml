@@ -1,0 +1,38 @@
+services:
+  etchmem-server:
+    build: .
+    container_name: etchmem-server
+    ports:
+      - "8000:8000"
+    environment:
+      # LLM cascade (Pydantic AI) — swap models freely.
+      ETCHMEM_CLAIM_MODEL: ${ETCHMEM_CLAIM_MODEL:-openai:gpt-5-mini}
+      ETCHMEM_ETCH_MODEL: ${ETCHMEM_ETCH_MODEL:-openai:gpt-5.5}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Embeddings
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      LOCAL_EMBEDDING_MODEL: ${LOCAL_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      # Storage (DuckDB files live here)
+      ETCHMEM_DATA_DIR: /data
+      # Stage 1 / entities / fold
+      ETCHMEM_SIGNAL_DEDUP_DISTANCE: ${ETCHMEM_SIGNAL_DEDUP_DISTANCE:-0.08}
+      ETCHMEM_ENTITY_SIM_THRESHOLD: ${ETCHMEM_ENTITY_SIM_THRESHOLD:-0.86}
+      ETCHMEM_MULTI_VALUE_PROPERTIES: ${ETCHMEM_MULTI_VALUE_PROPERTIES:-}
+      ETCHMEM_SOURCE_TRUST_JSON: ${ETCHMEM_SOURCE_TRUST_JSON:-{}}
+      ETCHMEM_TRUST_GAP: ${ETCHMEM_TRUST_GAP:-0.3}
+      # In-process worker (no broker)
+      ETCHMEM_WORKER_ENABLED: ${ETCHMEM_WORKER_ENABLED:-true}
+      ETCHMEM_WORKER_INTERVAL_SECONDS: ${ETCHMEM_WORKER_INTERVAL_SECONDS:-5}
+      ETCHMEM_EXTRACT_MIN_BATCH: ${ETCHMEM_EXTRACT_MIN_BATCH:-1}
+      ETCHMEM_EXTRACT_MAX_WAIT_SECONDS: ${ETCHMEM_EXTRACT_MAX_WAIT_SECONDS:-30}
+      ETCHMEM_EXTRACT_LLM_BATCH_SIZE: ${ETCHMEM_EXTRACT_LLM_BATCH_SIZE:-6}
+      ETCHMEM_EXTRACT_CONCURRENCY: ${ETCHMEM_EXTRACT_CONCURRENCY:-4}
+      ETCHMEM_LLM_MAX_RETRIES: ${ETCHMEM_LLM_MAX_RETRIES:-4}
+      ETCHMEM_SIGNAL_TTL_SECONDS: ${ETCHMEM_SIGNAL_TTL_SECONDS:-0}
+    volumes:
+      - etchmem-data:/data
+    restart: unless-stopped
+
+volumes:
+  etchmem-data:
