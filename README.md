@@ -2,7 +2,9 @@
 
 **The Knowledge Consolidation Engine for AI agents.**
 
-Your agents generate experience all day and forget it by the next session.
+Your agents' daily activity is full of hard-won facts — deals signed, decisions
+made, preferences learned. Saved in transcripts, yes; but as dead text, not as
+knowledge the next task can use as a pattern.
 etchmem turns that stream of raw signals into a clean, typed, versioned
 knowledge base: **one consolidated belief per fact**, with confidence,
 provenance, conflict status, and full version history — queryable at any
