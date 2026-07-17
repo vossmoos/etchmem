@@ -1,15 +1,34 @@
 # etchmem-server
 
-**The enterprise memory operating system for AI employees.**
+**The Knowledge Consolidation Engine for AI agents.**
 
-A REST service that turns a stream of raw agent signals into a clean, typed,
-versioned knowledge base — backed by **DuckDB** (two databases) and a
-**Pydantic AI** model cascade for consolidation. It is not RAG: instead of
-returning documents, it maintains *beliefs* — one consolidated statement
-("etch") per entity-property, with confidence, provenance, conflict status,
-and a full version history.
+Your agents generate experience all day and forget it by the next session.
+etchmem turns that stream of raw signals into a clean, typed, versioned
+knowledge base: **one consolidated belief per fact**, with confidence,
+provenance, conflict status, and full version history — queryable at any
+point in time.
 
-See [TODO.md](TODO.md) for the product vision and planned future capabilities.
+It is **not RAG**. RAG retrieves document chunks and leaves your agent to
+guess which of five contradicting versions is true. etchmem *consolidates*:
+it extracts claims, resolves entities, counts corroboration, settles or
+flags conflicts, and maintains the current belief — with an audit trail from
+every answer back to its sources.
+
+|                               | Vector DB / RAG             | etchmem                              |
+|-------------------------------|-----------------------------|--------------------------------------|
+| Returns                       | document chunks             | consolidated beliefs                 |
+| Contradicting sources         | all returned, agent guesses | resolved or flagged *contested*      |
+| "Why does the agent think that?" | unanswerable             | narrative + full provenance chain    |
+| Knowledge changes over time   | stale chunks accumulate     | versioned, superseded, time-travel   |
+| Confidence                    | similarity score            | corroboration-based confidence       |
+| Duplicate entities            | "Acme" ≠ "ACME Corp"        | one canonical entity                 |
+
+Keep your RAG for document search. Use etchmem for what your system *believes*.
+
+Backed by **DuckDB** (two databases) and a **Pydantic AI** model cascade.
+One process, one `docker compose up`, five endpoints.
+
+See [TODO.md](TODO.md) for the product vision and planned capabilities.
 
 ## Pipeline
 
@@ -22,23 +41,32 @@ See [TODO.md](TODO.md) for the product vision and planned future capabilities.
                        status: new → batched → extracted → consolidated
 ```
 
+### Core concepts
+
 - **Signal** — a raw deposit (`source`, `scope`, text, embedding). Immutable.
+  Call notes, tool outputs, emails, decisions — nothing to pre-structure.
 - **Claim** — one atomic typed assertion `(entity, property, value, polarity)`
   extracted from a signal. Append-only; identical claims merge as
-  *corroboration* (counted, never discarded) so confidence reflects how many
+  *corroboration* (counted, never discarded), so confidence reflects how many
   distinct sources agree.
 - **Etch** — the current belief for one `(entity, property)`: `current_value`,
-  `status` (settled/contested), `confidence`, a generated `narrative`, an
-  embedding for recall, and a `version`. The etch is a *fold over claims*.
-- **etch_versions** — an immutable snapshot per belief change → time-travel.
+  `status` (settled / contested), `confidence`, a one-sentence generated
+  `narrative` explaining the belief, an embedding for recall, and a `version`.
+  The etch is a *fold over claims*.
+- **etch_versions** — an immutable snapshot per belief change. This is what
+  makes time-travel and incident forensics possible: replay exactly what the
+  system believed when a decision was made.
 
 Entities are canonical (registry + aliases + fuzzy match), so "Acme Corp" and
 "ACME Corporation" resolve to one entity and never contaminate each other.
 
 ## The consolidation cascade (cheap → expensive)
 
-1. **Stage 1 — dedup (no LLM).** Embeddings group near-duplicate signals onto a
-   canonical representative, preserving every source for corroboration.
+Consolidation cost stays flat because expensive models only see genuinely
+hard cases:
+
+1. **Stage 1 — dedup (no LLM).** Embeddings group near-duplicate signals onto
+   a canonical representative, preserving every source for corroboration.
 2. **Stage 2 — claim extraction (mini model).** `claim_agent` turns a signal
    into typed claims, resolving/creating the canonical entity.
 3. **Routing gate (no LLM).** For each `(entity, property)` the gate inspects
@@ -46,33 +74,49 @@ Entities are canonical (registry + aliases + fuzzy match), so "Acme Corp" and
    source-trust / multi-value cardinality resolves it), or **CONTESTED**.
 4. **Stage 3 — conflict resolution (top model).** Only CONTESTED folds reach
    `etch_agent`, which resolves the disagreement and writes the narrative.
+   When a conflict can't be settled, the belief is marked *contested* — your
+   agents know what they know and how well they know it.
 
 Each model is a Pydantic-AI model string, swapped via one env var
-(`ETCHMEM_CLAIM_MODEL`, `ETCHMEM_ETCH_MODEL`).
+(`ETCHMEM_CLAIM_MODEL`, `ETCHMEM_ETCH_MODEL`). No vendor lock-in.
+
+## Explainability by construction
+
+Every belief answers "why do you think that?" without extra tooling:
+
+```
+belief (narrative, confidence, status)
+  └── claims (typed assertions, corroboration counts)
+        └── signals (raw deposits: which source, which scope, when)
+```
+
+`GET /etch/{id}/history` returns the full version timeline —
+what changed, when, and what triggered it.
 
 ## Runtime: one process, no broker
 
-The API process also runs an in-process async **worker loop**. The signal/claim
-`status` column *is* the queue. `POST /remember` writes a signal and returns
-`202` immediately; the worker drains `new → batched → extracted → consolidated`
-on a cadence. `POST /sleep` runs one tick on demand. Only one process touches
-DuckDB, sidestepping its single-writer constraint. (When volume demands it, the
-worker lifts out into its own container behind a real broker + Postgres/pgvector
-— see TODO.md.)
+The API process also runs an in-process async **worker loop**. The
+signal/claim `status` column *is* the queue. `POST /remember` writes a signal
+and returns `202` immediately; the worker drains
+`new → batched → extracted → consolidated` on a cadence. `POST /sleep` runs
+one tick on demand. Only one process touches DuckDB, sidestepping its
+single-writer constraint. When volume demands it, the worker lifts out into
+its own container behind a real broker + Postgres/pgvector — see TODO.md.
 
 ## API
 
 | Endpoint | Purpose |
 |----------|---------|
 | `POST /remember` | Deposit a raw signal (`source`, `scope`, `extract_mode`). |
-| `POST /recall` | Semantic recall over etches; `as_of` for time-travel. |
+| `POST /recall` | Semantic recall over beliefs; `as_of` for time-travel. |
 | `POST /sleep` | Run one worker tick now (batch → extract → fold). |
 | `POST /export` | Dump all etches to JSON files. |
-| `GET /etch/{id}/history` | Version timeline of one etch. |
+| `GET /etch/{id}/history` | Version timeline of one belief. |
 | `GET /stats` | Queue depths + counts (signals/claims/entities/etches/contested). |
 | `GET /health` | Liveness + active config. |
 
-Interactive docs at `http://localhost:8000/docs`.
+REST, any language, any agent framework. Interactive docs at
+`http://localhost:8000/docs`.
 
 ### Examples
 
@@ -86,11 +130,11 @@ curl -X POST localhost:8000/remember -H 'content-type: application/json' -d '{
 # Run a consolidation tick now (or let the worker do it on its cadence)
 curl -X POST localhost:8000/sleep
 
-# Recall the current belief
+# Recall the current belief — with confidence, narrative, provenance
 curl -X POST localhost:8000/recall -H 'content-type: application/json' \
   -d '{"query": "what is Acme'\''s contract status?", "top_k": 5}'
 
-# Time-travel: what did we believe as of a given time?
+# Time-travel: what did we believe as of a given moment?
 curl -X POST localhost:8000/recall -H 'content-type: application/json' \
   -d '{"query": "Acme contract status", "as_of": "2026-06-24T01:30:00Z"}'
 ```
@@ -122,7 +166,8 @@ Via environment / `.env` (see `.env.example`). Highlights:
 - `ETCHMEM_SIGNAL_DEDUP_DISTANCE`, `ETCHMEM_ENTITY_SIM_THRESHOLD` — dedup and
   entity-merge thresholds.
 - `ETCHMEM_MULTI_VALUE_PROPERTIES` — properties that union instead of conflict.
-- `ETCHMEM_SOURCE_TRUST_JSON` / `ETCHMEM_TRUST_GAP` — trust-based resolution.
+- `ETCHMEM_SOURCE_TRUST_JSON` / `ETCHMEM_TRUST_GAP` — trust-based conflict
+  resolution: rank your sources, let policy settle disagreements.
 - `ETCHMEM_WORKER_ENABLED`, `ETCHMEM_WORKER_INTERVAL_SECONDS`,
   `ETCHMEM_EXTRACT_MIN_BATCH`, `ETCHMEM_EXTRACT_MAX_WAIT_SECONDS` — worker cadence.
 
@@ -157,3 +202,10 @@ pytest -q       # fully offline; no API key needed
 Covered: entity-boundary (no contamination), corroboration raising confidence,
 recency supersession + versioning, genuine conflict → contested (LLM invoked),
 and time-travel recall.
+
+## Production deployments
+
+etchmem is open source — clone it, ship it, never talk to us. If you want it
+integrated into your agent stack faster (signal capture design, consolidation
+policy tuning, scoped knowledge across teams, recall wiring), we do
+fixed-scope implementations: [sovereignmachines.tech](https://sovereignmachines.tech).
