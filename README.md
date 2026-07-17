@@ -27,7 +27,8 @@ Keep your RAG for document search. Use etchmem for what your system *believes*
 and which patterns it knows.
 
 Backed by **DuckDB** (two databases) and a **Pydantic AI** model cascade.
-One process, one `docker compose up`, five endpoints.
+One process, one `docker compose up`, a REST API **and an MCP interface**
+(same operations as tools at `/mcp`).
 
 See [TODO.md](TODO.md) for the product vision and planned capabilities.
 
@@ -119,6 +120,54 @@ its own container behind a real broker + Postgres/pgvector — see TODO.md.
 REST, any language, any agent framework. Interactive docs at
 `http://localhost:8000/docs`.
 
+## MCP interface
+
+The same operations are exposed as **MCP tools** — `remember`, `recall`,
+`sleep`, `export`, `stats`, `etch_history` — over streamable HTTP at
+`http://localhost:8000/mcp` (stateless, JSON responses). One process serves
+both protocols, so Claude Code / Claude Desktop / any MCP client can use
+etchmem as a memory backend directly:
+
+```json
+{
+  "mcpServers": {
+    "etchmem": { "type": "http", "url": "http://localhost:8000/mcp" }
+  }
+}
+```
+
+## Export: your knowledge as training data
+
+`POST /export` (or the `export` MCP tool) dumps every consolidated etch to a
+timestamped directory of JSON files — one file per belief, carrying the
+current value, status, confidence, narrative, version and full provenance
+(claim ids + source signal ids). Because etches are already deduplicated,
+entity-resolved, conflict-settled and confidence-scored, the export is a
+clean, typed dataset rather than a document dump: use it to build fine-tuning
+corpora or evaluation sets from what your agents actually learned, feed
+distilled domain knowledge into your own models, or snapshot the knowledge
+base for backup and offline analysis. Combined with claims anonymization
+(below), the exported JSON is free of personal data — ready to leave the
+production boundary.
+
+## Claims anonymization (privacy mode)
+
+`ETCHMEM_CLAIMS_ANONYMIZATION=true` (default `false`) anonymizes personal
+data at the point where signals are folded into claims/etches — the
+retrieval surface:
+
+- **Person/company subject names** become consistent numbered pseudonyms
+  (`[PERSON_1]`, `[COMPANY_2]`), assigned once per canonical entity and
+  persisted — so corroboration, conflict detection and versioning keep
+  working across sources.
+- **Addresses, bank cards, IBANs, emails, phone numbers** inside values and
+  narratives become generic tokens (`[ADDRESS]`, `[BANK_CARD]`, `[IBAN]`,
+  `[EMAIL]`, `[PHONE]`) — enforced by both LLM instructions and a
+  deterministic regex safety net (`app/anonymize.py`).
+- **Recall returns etches only**: raw signals keep their original text for
+  provenance/audit but are never surfaced through retrieval while
+  anonymization is on.
+
 ### Examples
 
 ```bash
@@ -169,6 +218,8 @@ Via environment / `.env` (see `.env.example`). Highlights:
 - `ETCHMEM_MULTI_VALUE_PROPERTIES` — properties that union instead of conflict.
 - `ETCHMEM_SOURCE_TRUST_JSON` / `ETCHMEM_TRUST_GAP` — trust-based conflict
   resolution: rank your sources, let policy settle disagreements.
+- `ETCHMEM_CLAIMS_ANONYMIZATION` — anonymize personal data in claims/etches
+  (see above). Default `false`.
 - `ETCHMEM_WORKER_ENABLED`, `ETCHMEM_WORKER_INTERVAL_SECONDS`,
   `ETCHMEM_EXTRACT_MIN_BATCH`, `ETCHMEM_EXTRACT_MAX_WAIT_SECONDS` — worker cadence.
 
@@ -186,11 +237,15 @@ app/
   agents.py     Stage 2 claim_agent + Stage 3 conflict resolver (Pydantic AI)
   entities.py   entity resolution (find-or-create, alias, fuzzy)
   gate.py       deterministic routing gate + resolution policy + confidence
+  anonymize.py  claims anonymization: pseudonym labels, prompt blocks, regex scrub
   worker.py     Pipeline (batch/extract/fold) + in-process WorkerLoop
   service.py    wires everything; remember/recall/sleep/export/stats/history
-  main.py       FastAPI app + routes + worker lifespan
+  mcp_server.py MCP tools (FastMCP, streamable HTTP; mounted at /mcp)
+  main.py       FastAPI app + routes + MCP mount + worker lifespan
 tests/
-  test_integration.py  offline end-to-end (fake embedder + stub agents)
+  test_integration.py    offline end-to-end (fake embedder + stub agents)
+  test_anonymization.py  pseudonym consistency, regex scrub, signal exclusion
+  test_mcp.py            tool registration, /mcp mount, tool ↔ service parity
 ```
 
 ## Tests
@@ -202,7 +257,7 @@ pytest -q       # fully offline; no API key needed
 
 Covered: entity-boundary (no contamination), corroboration raising confidence,
 recency supersession + versioning, genuine conflict → contested (LLM invoked),
-and time-travel recall.
+time-travel recall, claims anonymization, and the MCP interface.
 
 ## Production deployments
 

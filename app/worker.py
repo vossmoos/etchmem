@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from app.agents import ClaimExtractor, ConflictResolver, ExtractionResult
+from app.anonymize import ANON_ENTITY_LABELS, scrub
 from app.config import settings
 from app.dedup import group_duplicates
 from app.entities import EntityResolver
@@ -176,14 +177,21 @@ class Pipeline:
 
             for ec in result.claims:
                 entity = self._entities.resolve(ec.entity_name, ec.entity_type, rep.scope)
-                value_norm = normalize_value(ec.value)
+                display_name, value = entity.name, ec.value
+                if settings.claims_anonymization:
+                    label = ANON_ENTITY_LABELS.get(entity.type)
+                    if label:
+                        display_name = self._s.right.get_or_assign_anon_token(
+                            entity.id, label)
+                    value = scrub(value)
+                value_norm = normalize_value(value)
                 cid = claim_hash(entity.id, ec.property, value_norm, ec.polarity)
                 claim = Claim(
                     id=cid,
                     entity_id=entity.id,
-                    entity_name=entity.name,
+                    entity_name=display_name,
                     property=ec.property,
-                    value=ec.value,
+                    value=value,
                     value_norm=value_norm,
                     polarity=ec.polarity,
                     event_time=_parse_event_time(ec.event_time, rep.created_at),
@@ -219,6 +227,8 @@ class Pipeline:
                 res = self._resolver.resolve(entity_name, prop, decision.competing)
                 value, status = res.current_value, res.status
                 confidence, narrative = res.confidence, res.narrative
+                if settings.claims_anonymization:  # safety net over LLM output
+                    value, narrative = scrub(value), scrub(narrative)
                 summary.contested += 1
             else:
                 value, status = decision.value, decision.status

@@ -141,3 +141,4 @@ class HealthResponse(BaseModel):
     claim_model: str
     etch_model: str
     worker_enabled: bool
+    claims_anonymization: bool = False

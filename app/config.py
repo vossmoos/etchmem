@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     source_trust_json: str = "{}"
     trust_gap: float = 0.3
 
+    # ── Privacy: claims anonymization ──────────────────────────────────────
+    # When true, personal data is anonymized as signals are folded into
+    # claims/etches: person/company names become consistent numbered tokens
+    # ([PERSON_1], [COMPANY_2]); addresses, bank cards, IBANs, emails and
+    # phone numbers become generic tokens ([ADDRESS], [BANK_CARD], ...).
+    # Recall then returns etches only (raw signals, which keep the original
+    # text for provenance, are never surfaced).
+    claims_anonymization: bool = False
+
     # ── Recall ─────────────────────────────────────────────────────────────
     recall_signal_weight: float = 0.6           # left-DB freshness enrichment
 
@@ -108,6 +117,7 @@ _ENV_ALIASES = {
     "multi_value_properties": "ETCHMEM_MULTI_VALUE_PROPERTIES",
     "source_trust_json": "ETCHMEM_SOURCE_TRUST_JSON",
     "trust_gap": "ETCHMEM_TRUST_GAP",
+    "claims_anonymization": "ETCHMEM_CLAIMS_ANONYMIZATION",
     "worker_enabled": "ETCHMEM_WORKER_ENABLED",
     "worker_interval_seconds": "ETCHMEM_WORKER_INTERVAL_SECONDS",
     "extract_min_batch": "ETCHMEM_EXTRACT_MIN_BATCH",

@@ -10,6 +10,9 @@ Endpoints:
   GET  /health            — liveness + active config
   GET  /etch/{id}/history — version timeline of one etch
 
+An MCP interface exposing the same operations as tools (remember, recall,
+sleep, export, stats, etch_history) is mounted at /mcp (streamable HTTP).
+
 A single in-process WorkerLoop runs the pipeline on a cadence (no broker).
 """
 from __future__ import annotations
@@ -25,6 +28,7 @@ from app.schemas import (
     ExportResponse, HealthResponse, HistoryResponse, RecallRequest, RecallResponse,
     RememberRequest, RememberResponse, SleepResponse, StatsResponse, VersionOut,
 )
+from app.mcp_server import mcp as mcp_server
 from app.service import MemoryService
 from app.worker import WorkerLoop
 
@@ -47,7 +51,8 @@ async def lifespan(app: FastAPI):
     if settings.worker_enabled:
         _worker = WorkerLoop(_service.get_pipeline())
         _worker.start()
-    yield
+    async with mcp_server.session_manager.run():
+        yield
     if _worker:
         await _worker.stop()
 
@@ -110,7 +115,12 @@ def health() -> HealthResponse:
         status="ok", version=__version__,
         embedding_provider=svc.embedder.name, embedding_dim=svc.embedder.dim,
         claim_model=settings.claim_model, etch_model=settings.etch_model,
-        worker_enabled=settings.worker_enabled)
+        worker_enabled=settings.worker_enabled,
+        claims_anonymization=settings.claims_anonymization)
+
+
+# MCP interface (tools over streamable HTTP) — one process, both protocols.
+app.mount("/mcp", mcp_server.streamable_http_app())
 
 
 if __name__ == "__main__":

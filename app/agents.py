@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
+from app.anonymize import EXTRACT_ANON_BLOCK, RESOLVE_ANON_BLOCK
 from app.config import settings
 
 if TYPE_CHECKING:
@@ -99,15 +100,17 @@ class PydanticAIClaimExtractor(ClaimExtractor):
         from app.ext import load_extensions
 
         self._registry = registry if registry is not None else load_extensions()
+        anon = EXTRACT_ANON_BLOCK if settings.claims_anonymization else ""
         self._agent = Agent(
             model or settings.claim_model,
             output_type=ExtractionResult,
-            system_prompt=_CLAIM_SYSTEM + self._registry.prompt_block(),
+            system_prompt=_CLAIM_SYSTEM + self._registry.prompt_block() + anon,
         )
         self._batch_agent = Agent(
             model or settings.claim_model,
             output_type=BatchExtractionResult,
-            system_prompt=_CLAIM_SYSTEM + self._registry.prompt_block() + _CLAIM_BATCH_SUFFIX,
+            system_prompt=_CLAIM_SYSTEM + self._registry.prompt_block()
+                          + _CLAIM_BATCH_SUFFIX + anon,
         )
 
     def extract(self, signal_text: str, known_entities: list[str] | None = None) -> ExtractionResult:
@@ -190,10 +193,11 @@ class PydanticAIConflictResolver(ConflictResolver):
     def __init__(self, model: str | None = None) -> None:
         from pydantic_ai import Agent
 
+        anon = RESOLVE_ANON_BLOCK if settings.claims_anonymization else ""
         self._agent = Agent(
             model or settings.etch_model,
             output_type=ConflictResolution,
-            system_prompt=_RESOLVE_SYSTEM,
+            system_prompt=_RESOLVE_SYSTEM + anon,
         )
 
     def resolve(self, entity_name: str, prop: str, claims: list[CompetingClaim]) -> ConflictResolution:

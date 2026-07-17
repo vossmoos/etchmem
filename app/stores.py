@@ -396,6 +396,11 @@ class RightStore:
                     created_at   DOUBLE,
                     PRIMARY KEY (etch_id, version)
                 );
+                CREATE TABLE IF NOT EXISTS anon_tokens (
+                    entity_id   VARCHAR PRIMARY KEY,
+                    token       VARCHAR,
+                    created_at  DOUBLE
+                );
                 """
             )
 
@@ -441,6 +446,26 @@ class RightStore:
     def count_entities(self) -> int:
         with self._lock:
             return int(self._con.execute("SELECT count(*) FROM entities").fetchone()[0])
+
+    # ── anonymization tokens ─────────────────────────────────────────────
+
+    def get_or_assign_anon_token(self, entity_id: str, label: str) -> str:
+        """Return the pseudonym for an entity, assigning the next numbered
+        token of its label ([PERSON_3], [COMPANY_1], ...) on first use.
+        Persisted, so the same entity always maps to the same token."""
+        with self._lock:
+            r = self._con.execute(
+                "SELECT token FROM anon_tokens WHERE entity_id = ?", [entity_id]).fetchone()
+            if r:
+                return r[0]
+            n = self._con.execute(
+                "SELECT count(*) FROM anon_tokens WHERE starts_with(token, ?)",
+                [f"[{label}_"]).fetchone()[0]
+            token = f"[{label}_{int(n) + 1}]"
+            self._con.execute(
+                "INSERT INTO anon_tokens (entity_id, token, created_at) VALUES (?,?,?)",
+                [entity_id, token, time.time()])
+            return token
 
     # ── etches ───────────────────────────────────────────────────────────
 

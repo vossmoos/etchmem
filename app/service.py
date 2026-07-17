@@ -60,6 +60,10 @@ class MemoryService:
 
     def recall(self, query, scope=None, source=None, top_k=5,
                include_signals=True, as_of=None) -> list[RecallResult]:
+        if settings.claims_anonymization:
+            # Raw signals keep the original (non-anonymized) text for
+            # provenance; never surface them through retrieval.
+            include_signals = False
         qvec = self.embedder.embed_one(query)
         as_of_ts = self._parse_as_of(as_of)
 
