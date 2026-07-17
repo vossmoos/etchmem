@@ -8,22 +8,25 @@ knowledge base: **one consolidated belief per fact**, with confidence,
 provenance, conflict status, and full version history — queryable at any
 point in time.
 
-It is **not RAG**. RAG retrieves document chunks and leaves your agent to
-guess which of five contradicting versions is true. etchmem *consolidates*:
-it extracts claims, resolves entities, counts corroboration, settles or
-flags conflicts, and maintains the current belief — with an audit trail from
-every answer back to its sources.
+It's **more advanced than RAG**. RAG retrieves document chunks and leaves your
+agent to guess which of five contradicting versions is true. etchmem
+*consolidates*: it extracts claims, resolves entities, counts corroboration,
+settles or flags conflicts, and maintains the current belief — with an audit
+trail from every answer back to its sources — and does it transparently.
 
-|                               | Vector DB / RAG             | etchmem                              |
+|                               | Custom RAG                  | etchmem                              |
 |-------------------------------|-----------------------------|--------------------------------------|
-| Returns                       | document chunks             | consolidated beliefs                 |
+| Returns                       | document chunks             | consolidated beliefs (memory etches) |
 | Contradicting sources         | all returned, agent guesses | resolved or flagged *contested*      |
 | "Why does the agent think that?" | unanswerable             | narrative + full provenance chain    |
 | Knowledge changes over time   | stale chunks accumulate     | versioned, superseded, time-travel   |
 | Confidence                    | similarity score            | corroboration-based confidence       |
 | Duplicate entities            | "Acme" ≠ "ACME Corp"        | one canonical entity                 |
 
-Keep your RAG for document search. Use etchmem for what your system *believes*.
+Keep your RAG for document search. Use etchmem for what your system *believes*
+and which patterns it knows.
+
+[etchmem.io](https://etchmem.io)
 
 Backed by **DuckDB** (two databases) and a **Pydantic AI** model cascade.
 One process, one `docker compose up`, five endpoints.
