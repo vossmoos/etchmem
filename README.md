@@ -26,8 +26,6 @@ trail from every answer back to its sources — and does it transparently.
 Keep your RAG for document search. Use etchmem for what your system *believes*
 and which patterns it knows.
 
-[etchmem.io](https://etchmem.io)
-
 Backed by **DuckDB** (two databases) and a **Pydantic AI** model cascade.
 One process, one `docker compose up`, five endpoints.
 
@@ -211,4 +209,4 @@ and time-travel recall.
 etchmem is open source — clone it, ship it, never talk to us. If you want it
 integrated into your agent stack faster (signal capture design, consolidation
 policy tuning, scoped knowledge across teams, recall wiring), we do
-fixed-scope implementations: [sovereignmachines.tech](https://sovereignmachines.tech).
+fixed-scope implementations: [etchmem.io](https://etchmem.io).
