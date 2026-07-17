@@ -84,6 +84,37 @@ hard cases:
 Each model is a Pydantic-AI model string, swapped via one env var
 (`ETCHMEM_CLAIM_MODEL`, `ETCHMEM_ETCH_MODEL`). No vendor lock-in.
 
+## Claim extensions (declarative domain vocabulary)
+
+Out of the box the extractor is open-vocabulary: it invents sensible
+snake_case properties as it goes. Extensions let you *steer* it with your
+domain's vocabulary — declaratively, without touching code or the DuckDB
+schema. Drop YAML files into `ext/` (override with `ETCHMEM_EXT_DIR`), one
+domain per file; `ext/sales.yaml` ships as an example:
+
+```yaml
+domain: sales
+properties:
+  - name: sales_intent
+    description: How strongly the subject signals intent to purchase.
+    values: [none, low, medium, high]     # optional enum (case-insensitive)
+    entity_types: [company, person]       # optional subject filter
+  - name: decision_maker
+    description: Named person who owns the buying decision.
+    entity_types: [company]
+```
+
+Declared properties are injected into the extractor's system prompt (so it
+actively looks for them) and **enforced on the way back**: a declared enum
+rejects drifting values (no `sales_intent: "very high"`), and `entity_types`
+rejects claims about the wrong kind of subject. Undeclared properties still
+pass — the core stays open-vocabulary. Each declared property becomes a plain
+`(entity, property, value)` claim and therefore a plain etch
+(`entity.sales_intent`), flowing through the same corroboration, gate and
+versioning as everything else. Extensions are additive vocabulary only; they
+never override the core triple. Edit or add files, then restart the server to
+pick up changes.
+
 ## Explainability by construction
 
 Every belief answers "why do you think that?" without extra tooling:
@@ -218,6 +249,7 @@ Via environment / `.env` (see `.env.example`). Highlights:
 - `ETCHMEM_SIGNAL_DEDUP_DISTANCE`, `ETCHMEM_ENTITY_SIM_THRESHOLD` — dedup and
   entity-merge thresholds.
 - `ETCHMEM_MULTI_VALUE_PROPERTIES` — properties that union instead of conflict.
+- `ETCHMEM_EXT_DIR` — folder of claim-extension YAML files (see above).
 - `ETCHMEM_SOURCE_TRUST_JSON` / `ETCHMEM_TRUST_GAP` — trust-based conflict
   resolution: rank your sources, let policy settle disagreements.
 - `ETCHMEM_CLAIMS_ANONYMIZATION` — anonymize personal data in claims/etches
@@ -236,6 +268,7 @@ app/
   hashing.py    content + claim hashing (corroboration & idempotency)
   stores.py     LeftStore (signals, claims) + RightStore (entities, etches, versions)
   dedup.py      Stage 1 — embedding dedup
+  ext.py        claim extensions: YAML domain vocabulary → prompt + enum enforcement
   agents.py     Stage 2 claim_agent + Stage 3 conflict resolver (Pydantic AI)
   entities.py   entity resolution (find-or-create, alias, fuzzy)
   gate.py       deterministic routing gate + resolution policy + confidence
