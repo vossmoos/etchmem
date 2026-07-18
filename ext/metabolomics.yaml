@@ -1,0 +1,37 @@
+# Metabolomics / multi-omics feature-triage extension.
+# Teaches the extractor the vocabulary a triage agent uses so every run folds
+# onto the SAME (entity, property) etch — making belief change (e.g. a feature
+# going artifact -> biomarker) a clean, deterministic supersession.
+#
+# Additive only: each declared property becomes a normal (entity, property,
+# value) claim -> etch (entity.<property>), flowing through the same
+# corroboration, gate and versioning as everything else.
+#
+# entity_types is intentionally left OFF: the extractor's subject-type guess
+# for a spectral feature varies (metabolite / feature / compound), and an
+# entity_type filter would reject otherwise-valid claims. The enums below are
+# what pin consistency.
+#
+# Edit / add files here, then restart the server (or set ETCHMEM_EXT_DIR) to
+# pick up changes.
+domain: metabolomics
+properties:
+  - name: classification
+    description: >-
+      Triage verdict for a spectral feature / metabolite — is it real,
+      analytical noise, or a validated finding. Use for any "is this feature
+      signal or artifact / biomarker" call.
+    values: [artifact, contaminant, unknown, putative, biomarker]
+
+  - name: annotation
+    description: >-
+      The chemical identity assigned to a feature (e.g. a metabolite name or
+      database ID). Free text; captured as the current best identification.
+
+  - name: regulation
+    description: Direction of change of the feature between compared groups.
+    values: [up, down, unchanged]
+
+  - name: evidence_level
+    description: Strength of support behind the current classification.
+    values: [none, single_run, corroborated, validated]

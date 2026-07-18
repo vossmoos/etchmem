@@ -10,6 +10,14 @@ knowledge base: **one consolidated belief per fact**, with confidence,
 provenance, conflict status, and full version history — queryable at any
 point in time.
 
+**Extend a skill with dynamic data — without rewriting the skill.** Today,
+teaching an agent something new usually means editing its `SKILL.md` by hand:
+rewrite the text, redeploy, repeat. etchmem makes skill knowledge a live layer
+instead. Scope memory to a skill, and the agent recalls matured, consolidated
+beliefs at runtime — the skill's *behavior* grows as new signals arrive, while
+its prompt text stays untouched. The skill file stays the stable contract; the
+knowledge behind it is a dynamic extension, not another rewrite.
+
 It's **more advanced than RAG**. RAG retrieves document chunks and leaves your
 agent to guess which of five contradicting versions is true. etchmem
 *consolidates*: it extracts claims, resolves entities, counts corroboration,
