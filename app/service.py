@@ -19,7 +19,7 @@ from app.agents import (
 from app.config import settings
 from app.embeddings import EmbeddingProvider, build_embedder
 from app.hashing import content_hash
-from app.schemas import EtchOut, RecallResult
+from app.schemas import ClaimOut, DossierResponse, EtchOut, RecallResult, SignalOut, VersionOut
 from app.stores import S_BATCHED, S_EXTRACTED, S_NEW, Signal, Stores
 from app.worker import Pipeline
 
@@ -127,6 +127,44 @@ class MemoryService:
 
     def history(self, etch_id: str) -> list[dict[str, Any]]:
         return self.stores.right.versions(etch_id)
+
+    # ── dossier ────────────────────────────────────────────────────────────────
+
+    def dossier(self, etch_id: str) -> DossierResponse | None:
+        """Full provenance for one belief: etch + versions + claims + signals."""
+        e = self.stores.right.get_etch(etch_id)
+        if e is None:
+            return None
+        etch = EtchOut(
+            id=e.id, entity_name=e.entity_name, property=e.property,
+            current_value=e.current_value, status=e.status, confidence=e.confidence,
+            narrative=e.narrative, version=e.version, scope=e.scope, source=e.source,
+            claim_ids=e.claim_ids, source_ids=e.source_ids,
+            created_at=e.created_at, updated_at=e.updated_at)
+        versions = [VersionOut(**v) for v in self.stores.right.versions(etch_id)]
+        claims = [
+            ClaimOut(
+                id=c.id, entity_name=c.entity_name, property=c.property,
+                value=c.value, polarity=c.polarity,
+                corroboration_count=c.corroboration_count, confidence=c.confidence,
+                sources=c.sources, evidence_signal_ids=c.evidence_signal_ids,
+                scope=c.scope, event_time=c.event_time, ingest_time=c.ingest_time,
+                created_at=c.created_at)
+            for c in self.stores.left.claims_by_ids(e.claim_ids)]
+        signals: list[SignalOut] = []
+        signals_omitted = False
+        if settings.claims_anonymization:
+            # Raw signals keep the original (non-anonymized) text — never surface.
+            signals_omitted = True
+        else:
+            sig_ids = sorted({sid for c in claims for sid in c.evidence_signal_ids}
+                             | set(e.source_ids))
+            signals = [
+                SignalOut(id=s.id, content=s.content, source=s.source,
+                          scope=s.scope, created_at=s.created_at)
+                for s in self.stores.left.signals_by_ids(list(sig_ids))]
+        return DossierResponse(etch=etch, versions=versions, claims=claims,
+                               signals=signals, signals_omitted=signals_omitted)
 
     # ── stats ────────────────────────────────────────────────────────────────
 

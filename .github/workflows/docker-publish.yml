@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Docker image tag (e.g. 1.0.0, latest)"
+        description: "Version tag (e.g. 0.0.3). Also pushes :latest."
         required: true
         type: string
 
@@ -37,6 +37,9 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
+            ${{ env.IMAGE_NAME }}:latest
+
           cache-from: type=gha
           cache-to: type=gha,mode=max

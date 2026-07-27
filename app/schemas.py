@@ -119,6 +119,43 @@ class HistoryResponse(BaseModel):
     versions: list[VersionOut]
 
 
+# ── dossier ──────────────────────────────────────────────────────────────────
+
+class ClaimOut(BaseModel):
+    id: str
+    entity_name: str
+    property: str
+    value: str
+    polarity: str
+    corroboration_count: int
+    confidence: float
+    sources: list[str] = Field(default_factory=list)
+    evidence_signal_ids: list[str] = Field(default_factory=list)
+    scope: str | None = None
+    event_time: float = 0.0
+    ingest_time: float = 0.0
+    created_at: float = 0.0
+
+
+class SignalOut(BaseModel):
+    id: str
+    content: str
+    source: str
+    scope: str
+    created_at: float = 0.0
+
+
+class DossierResponse(BaseModel):
+    """Full provenance view of one belief: the etch, its version timeline,
+    the claims that formed it, and the raw signals behind those claims."""
+    etch: EtchOut
+    versions: list[VersionOut]
+    claims: list[ClaimOut]
+    signals: list[SignalOut] = Field(default_factory=list)
+    signals_omitted: bool = Field(
+        False, description="True when claims_anonymization hides raw signals.")
+
+
 # ── stats / health ───────────────────────────────────────────────────────────
 
 class StatsResponse(BaseModel):

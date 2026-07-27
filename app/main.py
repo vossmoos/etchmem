@@ -9,6 +9,8 @@ Endpoints:
   GET  /stats             — queue depths + counts
   GET  /health            — liveness + active config
   GET  /etch/{id}/history — version timeline of one etch
+  GET  /etch/{id}/dossier — full provenance: etch + versions + claims + signals
+  GET  /ui                — Etchmem Beliefs Explorer (single-page report UI)
 
 An MCP interface exposing the same operations as tools (remember, recall,
 sleep, export, stats, etch_history) is mounted at /mcp (streamable HTTP).
@@ -25,8 +27,9 @@ from fastapi import FastAPI, HTTPException
 from app import __version__
 from app.config import settings
 from app.schemas import (
-    ExportResponse, HealthResponse, HistoryResponse, RecallRequest, RecallResponse,
-    RememberRequest, RememberResponse, SleepResponse, StatsResponse, VersionOut,
+    DossierResponse, ExportResponse, HealthResponse, HistoryResponse, RecallRequest,
+    RecallResponse, RememberRequest, RememberResponse, SleepResponse, StatsResponse,
+    VersionOut,
 )
 from app.mcp_server import mcp as mcp_server
 from app.service import MemoryService
@@ -103,6 +106,14 @@ def history(etch_id: str) -> HistoryResponse:
     return HistoryResponse(etch_id=etch_id, versions=[VersionOut(**v) for v in versions])
 
 
+@app.get("/etch/{etch_id:path}/dossier", response_model=DossierResponse)
+def dossier(etch_id: str) -> DossierResponse:
+    d = get_service().dossier(etch_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail=f"Unknown etch: {etch_id}")
+    return d
+
+
 @app.get("/stats", response_model=StatsResponse)
 def stats() -> StatsResponse:
     return StatsResponse(**get_service().stats())
@@ -117,6 +128,19 @@ def health() -> HealthResponse:
         claim_model=settings.claim_model, etch_model=settings.etch_model,
         worker_enabled=settings.worker_enabled,
         claims_anonymization=settings.claims_anonymization)
+
+
+# ── Etchmem Beliefs Explorer (single static page; print-to-PDF for export) ──
+if settings.ui_enabled:
+    from pathlib import Path
+
+    from fastapi.responses import FileResponse
+
+    _UI_PAGE = Path(__file__).parent / "static" / "explorer.html"
+
+    @app.get("/ui", include_in_schema=False)
+    def ui() -> FileResponse:
+        return FileResponse(_UI_PAGE, media_type="text/html")
 
 
 # MCP interface (tools over streamable HTTP) — one process, both protocols.

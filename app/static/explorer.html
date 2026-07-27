@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Etchmem Beliefs Explorer</title>
+<style>
+  :root {
+    --ink: #10203a;
+    --body: #2c3e50;
+    --muted: #6b7a90;
+    --faint: #9aa7b8;
+    --line: #dde4ec;
+    --line-soft: #edf1f6;
+    --accent: #1c3d6e;
+    --accent-soft: #eef3fa;
+    --settled: #1d6f42;
+    --settled-bg: #e9f5ee;
+    --contested: #9a5b00;
+    --contested-bg: #fdf3e3;
+    --signal: #5b6b7f;
+    --signal-bg: #eff2f6;
+    --paper: #ffffff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: #f4f6f9; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, "Segoe UI", sans-serif;
+    color: var(--body);
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page {
+    max-width: 900px;
+    margin: 0 auto;
+    background: var(--paper);
+    min-height: 100vh;
+    padding: 40px 56px 72px;
+    box-shadow: 0 0 24px rgba(16, 32, 58, .06);
+  }
+
+  /* ── Masthead ─────────────────────────────────────────────── */
+  .masthead {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding-bottom: 14px;
+    border-bottom: 3px double var(--ink);
+  }
+  .wordmark { font-size: 21px; font-weight: 700; letter-spacing: .12em;
+              color: var(--ink); text-transform: uppercase; }
+  .wordmark small { font-weight: 400; letter-spacing: .18em; font-size: 11px;
+                    color: var(--muted); display: block; margin-top: 2px;
+                    text-transform: uppercase; }
+  .masthead-right { text-align: right; font-size: 11px; color: var(--faint); }
+
+  /* ── Controls ─────────────────────────────────────────────── */
+  .controls {
+    display: grid; grid-template-columns: 1fr 232px; gap: 28px;
+    padding: 24px 0 26px; border-bottom: 1px solid var(--line);
+  }
+  .field-label { font-size: 10px; text-transform: uppercase; letter-spacing: .14em;
+                 color: var(--muted); margin-bottom: 6px; display: block; }
+  .query-row { display: flex; gap: 8px; }
+  input[type=text], select {
+    font: inherit; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 9px 12px; background: #fff; width: 100%;
+    outline: none;
+  }
+  input[type=text]:focus, select:focus { border-color: var(--accent); }
+  .sub-row { display: flex; gap: 16px; margin-top: 16px; }
+  .sub-row > div { flex: 1; }
+  .btn {
+    font: inherit; font-weight: 600; cursor: pointer;
+    border: 1px solid var(--accent); border-radius: 3px;
+    background: var(--accent); color: #fff; padding: 9px 20px;
+    letter-spacing: .02em; white-space: nowrap;
+  }
+  .btn:hover { background: #16325c; }
+  .btn.ghost { background: #fff; color: var(--accent); }
+  .btn.ghost:hover { background: var(--accent-soft); }
+  .btn:disabled { opacity: .5; cursor: default; }
+
+  /* ── Calendar ─────────────────────────────────────────────── */
+  .cal { border: 1px solid var(--line); border-radius: 3px; padding: 10px 12px 12px; }
+  .cal-head { display: flex; align-items: center; justify-content: space-between;
+              margin-bottom: 6px; }
+  .cal-title { font-size: 12px; font-weight: 600; color: var(--ink);
+               letter-spacing: .04em; }
+  .cal-nav { background: none; border: none; cursor: pointer; color: var(--muted);
+             font-size: 14px; padding: 2px 7px; border-radius: 3px; }
+  .cal-nav:hover { background: var(--accent-soft); color: var(--accent); }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; }
+  .cal-dow { font-size: 9px; text-transform: uppercase; color: var(--faint);
+             text-align: center; padding: 3px 0; letter-spacing: .08em; }
+  .cal-day {
+    font-size: 12px; text-align: center; padding: 5px 0; cursor: pointer;
+    border-radius: 3px; border: none; background: none; color: var(--body);
+    font-family: inherit;
+  }
+  .cal-day:hover { background: var(--accent-soft); }
+  .cal-day.other { color: #c4ccd6; }
+  .cal-day.today { font-weight: 700; color: var(--accent); }
+  .cal-day.sel { background: var(--accent); color: #fff; font-weight: 600; }
+  .cal-day.future { color: #d5dbe3; cursor: default; }
+  .cal-day.future:hover { background: none; }
+  .cal-foot { margin-top: 8px; text-align: center; }
+  .cal-foot button { background: none; border: none; color: var(--accent);
+                     font-size: 11px; cursor: pointer; text-decoration: underline;
+                     font-family: inherit; }
+
+  /* ── Report chrome ────────────────────────────────────────── */
+  .report { padding-top: 30px; }
+  .report-kicker { font-size: 10px; text-transform: uppercase; letter-spacing: .22em;
+                   color: var(--accent); font-weight: 700; margin-bottom: 6px; }
+  h1.report-title { font-size: 24px; font-weight: 700; color: var(--ink);
+                    letter-spacing: -.01em; margin-bottom: 18px; }
+  .meta-grid {
+    display: grid; grid-template-columns: repeat(4, auto); gap: 6px 40px;
+    justify-content: start;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    padding: 12px 0; margin-bottom: 28px; font-size: 12px;
+  }
+  .meta-grid dt { font-size: 9px; text-transform: uppercase; letter-spacing: .14em;
+                  color: var(--faint); }
+  .meta-grid dd { color: var(--ink); font-weight: 600; }
+
+  .toolbar { display: flex; justify-content: flex-end; gap: 8px; margin: 18px 0 0; }
+
+  /* ── Belief entries ───────────────────────────────────────── */
+  .belief {
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 18px 22px; margin-bottom: 14px;
+    break-inside: avoid;
+  }
+  .belief-top { display: flex; align-items: baseline; justify-content: space-between;
+                gap: 12px; }
+  .belief-subject { font-size: 15px; font-weight: 700; color: var(--ink); }
+  .belief-subject .prop { color: var(--muted); font-weight: 400; }
+  .badge {
+    display: inline-block; font-size: 9px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .1em;
+    padding: 3px 9px; border-radius: 2px; white-space: nowrap;
+  }
+  .badge.settled { color: var(--settled); background: var(--settled-bg); }
+  .badge.contested { color: var(--contested); background: var(--contested-bg); }
+  .badge.signal { color: var(--signal); background: var(--signal-bg); }
+  .belief-value { font-size: 14px; color: var(--ink); margin: 8px 0 10px;
+                  padding-left: 12px; border-left: 3px solid var(--accent); }
+  .belief-narrative { color: var(--body); font-size: 13px; margin-bottom: 12px; }
+  .belief-foot { display: flex; align-items: center; gap: 22px; font-size: 11px;
+                 color: var(--muted); flex-wrap: wrap; }
+  .conf { display: flex; align-items: center; gap: 8px; }
+  .conf-track { width: 90px; height: 5px; background: var(--line-soft);
+                border-radius: 3px; overflow: hidden; }
+  .conf-fill { height: 100%; background: var(--accent); }
+  .dossier-link { margin-left: auto; background: none; border: none;
+                  color: var(--accent); font-size: 11px; font-weight: 600;
+                  cursor: pointer; text-decoration: underline; font-family: inherit; }
+
+  /* ── Dossier ──────────────────────────────────────────────── */
+  .back { background: none; border: none; color: var(--accent); cursor: pointer;
+          font: inherit; font-size: 12px; padding: 0; margin-bottom: 18px;
+          text-decoration: underline; }
+  .section-h { font-size: 11px; text-transform: uppercase; letter-spacing: .18em;
+               color: var(--accent); font-weight: 700;
+               border-bottom: 1px solid var(--line); padding-bottom: 6px;
+               margin: 34px 0 14px; }
+  .summary-box { border: 1px solid var(--line); border-left: 4px solid var(--accent);
+                 padding: 18px 22px; border-radius: 3px; break-inside: avoid; }
+
+  table.grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.grid th {
+    text-align: left; font-size: 9px; text-transform: uppercase;
+    letter-spacing: .12em; color: var(--faint); font-weight: 700;
+    border-bottom: 1.5px solid var(--ink); padding: 6px 10px 6px 0;
+  }
+  table.grid td { border-bottom: 1px solid var(--line-soft);
+                  padding: 8px 10px 8px 0; vertical-align: top; color: var(--body); }
+  table.grid td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.grid th.num { text-align: right; }
+
+  .timeline { list-style: none; }
+  .tl-item { position: relative; padding: 0 0 18px 26px;
+             border-left: 2px solid var(--line); margin-left: 6px;
+             break-inside: avoid; }
+  .tl-item:last-child { border-left-color: transparent; }
+  .tl-item::before {
+    content: ""; position: absolute; left: -6px; top: 3px;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #fff; border: 2.5px solid var(--accent);
+  }
+  .tl-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .tl-version { font-weight: 700; color: var(--ink); font-size: 13px; }
+  .tl-date { font-size: 11px; color: var(--faint); }
+  .tl-value { margin: 4px 0 3px; color: var(--ink); font-size: 13px; }
+  .tl-narrative { font-size: 12px; color: var(--muted); }
+
+  .sig { border: 1px solid var(--line); border-radius: 3px; padding: 12px 16px;
+         margin-bottom: 10px; break-inside: avoid; }
+  .sig-head { display: flex; justify-content: space-between; font-size: 10px;
+              text-transform: uppercase; letter-spacing: .1em; color: var(--faint);
+              margin-bottom: 6px; }
+  .sig-content { font-size: 12.5px; color: var(--body); white-space: pre-wrap; }
+
+  .notice { padding: 26px; text-align: center; color: var(--muted);
+            border: 1px dashed var(--line); border-radius: 3px; font-size: 13px; }
+  .notice.error { color: #a02020; border-color: #e5b8b8; background: #fdf6f6; }
+  .mono { font-family: "SF Mono", Consolas, Menlo, monospace; font-size: 11px; }
+
+  .report-foot { margin-top: 44px; padding-top: 12px;
+                 border-top: 1px solid var(--line);
+                 display: flex; justify-content: space-between;
+                 font-size: 10px; color: var(--faint);
+                 text-transform: uppercase; letter-spacing: .1em; }
+  .hidden { display: none !important; }
+
+  /* ── Print ────────────────────────────────────────────────── */
+  @media print {
+    html { background: #fff; }
+    .page { box-shadow: none; max-width: none; padding: 0; min-height: 0; }
+    .controls, .toolbar, .dossier-link, .back, .no-print { display: none !important; }
+    .masthead { border-bottom-width: 2.5px; }
+    body { font-size: 12px; }
+    a { color: inherit; text-decoration: none; }
+  }
+  @page { margin: 18mm 16mm; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="masthead">
+    <div class="wordmark">Etchmem<small>Beliefs Explorer</small></div>
+    <div class="masthead-right">
+      <div id="server-line">etchmem-server</div>
+      <div id="stats-line"></div>
+    </div>
+  </header>
+
+  <section class="controls no-print">
+    <div>
+      <label class="field-label" for="q">Search beliefs</label>
+      <div class="query-row">
+        <input id="q" type="text" placeholder="e.g. Acme contract status, preferred stack, renewal terms…"
+               autocomplete="off">
+        <button id="go" class="btn">Generate report</button>
+      </div>
+      <div class="sub-row">
+        <div>
+          <label class="field-label" for="scope">Scope</label>
+          <select id="scope"><option value="">All scopes</option></select>
+        </div>
+        <div>
+          <label class="field-label" for="topk">Max results</label>
+          <select id="topk">
+            <option>5</option><option selected>10</option>
+            <option>20</option><option>50</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div>
+      <label class="field-label">As-of date</label>
+      <div class="cal" id="cal"></div>
+    </div>
+  </section>
+
+  <main id="view"><div class="notice">
+    Enter a search string to generate a beliefs report.<br>
+    Pick a past date on the calendar to reconstruct what was believed then.
+  </div></main>
+
+  <footer class="report-foot">
+    <span>Etchmem &mdash; Knowledge Consolidation Engine</span>
+    <span id="foot-right"></span>
+  </footer>
+</div>
+
+<script>
+"use strict";
+
+// ── State ────────────────────────────────────────────────────────────
+const today = stripTime(new Date());
+const state = {
+  selDate: new Date(today),      // selected as-of date (day precision)
+  calMonth: new Date(today.getFullYear(), today.getMonth(), 1),
+  lastReport: null,              // cached report params for "back"
+};
+
+const $ = (id) => document.getElementById(id);
+const view = $("view");
+
+function stripTime(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+function isToday(d) { return d.getTime() === today.getTime(); }
+function fmtDate(d) {
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+}
+function fmtTs(epoch) {
+  if (!epoch) return "—";
+  return new Date(epoch * 1000).toLocaleString(undefined,
+    { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function pct(x) { return Math.round((x ?? 0) * 100); }
+
+// API base: resolve relative to this page so path-prefix proxies keep working.
+function api(path) { return new URL(path, window.location.href).toString(); }
+
+async function getJSON(path, opts) {
+  const r = await fetch(api(path), opts);
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${await r.text()}`);
+  return r.json();
+}
+
+// ── Calendar ─────────────────────────────────────────────────────────
+function renderCalendar() {
+  const m = state.calMonth;
+  const title = m.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const first = new Date(m.getFullYear(), m.getMonth(), 1);
+  const startDow = (first.getDay() + 6) % 7;                 // Monday-first
+  const start = new Date(first); start.setDate(1 - startDow);
+  let cells = "";
+  for (const dow of ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"])
+    cells += `<span class="cal-dow">${dow}</span>`;
+  const d = new Date(start);
+  for (let i = 0; i < 42; i++) {
+    const other = d.getMonth() !== m.getMonth();
+    const future = d.getTime() > today.getTime();
+    const cls = ["cal-day", other && "other", isToday(d) && "today",
+      d.getTime() === state.selDate.getTime() && "sel", future && "future"]
+      .filter(Boolean).join(" ");
+    cells += `<button type="button" class="${cls}" ${future ? "disabled" : ""}
+      data-ts="${d.getTime()}">${d.getDate()}</button>`;
+    d.setDate(d.getDate() + 1);
+  }
+  $("cal").innerHTML = `
+    <div class="cal-head">
+      <button type="button" class="cal-nav" data-nav="-1" aria-label="Previous month">&#8249;</button>
+      <span class="cal-title">${title}</span>
+      <button type="button" class="cal-nav" data-nav="1" aria-label="Next month">&#8250;</button>
+    </div>
+    <div class="cal-grid">${cells}</div>
+    <div class="cal-foot"><button type="button" id="cal-today">Today</button></div>`;
+}
+
+$("cal").addEventListener("click", (ev) => {
+  const nav = ev.target.closest("[data-nav]");
+  if (nav) {
+    state.calMonth.setMonth(state.calMonth.getMonth() + Number(nav.dataset.nav));
+    renderCalendar(); return;
+  }
+  if (ev.target.id === "cal-today") {
+    state.selDate = new Date(today);
+    state.calMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    renderCalendar(); return;
+  }
+  const day = ev.target.closest(".cal-day[data-ts]");
+  if (day && !day.disabled) {
+    state.selDate = stripTime(new Date(Number(day.dataset.ts)));
+    renderCalendar();
+    if ($("q").value.trim()) runReport();
+  }
+});
+
+// ── Facts report ─────────────────────────────────────────────────────
+function asOfParam() {
+  if (isToday(state.selDate)) return null;                    // live view
+  const end = new Date(state.selDate); end.setHours(23, 59, 59, 999);
+  return end.toISOString();
+}
+
+async function runReport() {
+  const query = $("q").value.trim();
+  if (!query) { $("q").focus(); return; }
+  const scope = $("scope").value || null;
+  const topK = Number($("topk").value);
+  const asOf = asOfParam();
+  busy(true);
+  try {
+    const data = await getJSON("recall", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, scope, top_k: topK,
+                             include_signals: true, as_of: asOf }),
+    });
+    state.lastReport = { query, scope, topK };
+    renderReport(query, scope, asOf, data.results || []);
+  } catch (e) {
+    view.innerHTML = `<div class="notice error">Report failed: ${esc(e.message)}</div>`;
+  } finally { busy(false); }
+}
+
+function renderReport(query, scope, asOf, results) {
+  const asOfLabel = asOf ? fmtDate(state.selDate) + " (historical)" : fmtDate(today) + " (current)";
+  const rows = results.length ? results.map(beliefEntry).join("") :
+    `<div class="notice">No beliefs matched &ldquo;${esc(query)}&rdquo;
+       as of ${esc(asOfLabel)}.</div>`;
+  view.innerHTML = `
+    <div class="report">
+      <div class="report-kicker">Beliefs Report</div>
+      <h1 class="report-title">&ldquo;${esc(query)}&rdquo;</h1>
+      <dl class="meta-grid">
+        <div><dt>As of</dt><dd>${esc(asOfLabel)}</dd></div>
+        <div><dt>Scope</dt><dd>${esc(scope || "All")}</dd></div>
+        <div><dt>Results</dt><dd>${results.length}</dd></div>
+        <div><dt>Generated</dt><dd>${new Date().toLocaleString()}</dd></div>
+      </dl>
+      ${rows}
+      <div class="toolbar">
+        <button class="btn ghost" onclick="window.print()">Print / Save as PDF</button>
+      </div>
+    </div>`;
+  $("foot-right").textContent =
+    `Report generated ${new Date().toLocaleString()} · as of ${asOfLabel}`;
+}
+
+function beliefEntry(r) {
+  const status = r.origin === "signal" ? "signal" : (r.status || "settled");
+  const subject = r.entity_name
+    ? `${esc(r.entity_name)} <span class="prop">&mdash; ${esc((r.property || "").replaceAll("_", " "))}</span>`
+    : `<span class="prop">Raw signal</span>`;
+  const conf = r.confidence != null ? `
+    <span class="conf">Confidence
+      <span class="conf-track"><span class="conf-fill" style="width:${pct(r.confidence)}%"></span></span>
+      ${pct(r.confidence)}%</span>` : "";
+  const dossier = r.origin === "etch" ? `
+    <button class="dossier-link" data-etch="${esc(r.id)}">Belief dossier &rarr;</button>` : "";
+  return `
+  <article class="belief">
+    <div class="belief-top">
+      <div class="belief-subject">${subject}</div>
+      <span class="badge ${status}">${esc(status)}</span>
+    </div>
+    ${r.value ? `<div class="belief-value">${esc(r.value)}</div>` : ""}
+    <div class="belief-narrative">${esc(r.content)}</div>
+    <div class="belief-foot">
+      ${conf}
+      ${r.version != null ? `<span>Version ${r.version}</span>` : ""}
+      ${r.scope ? `<span>Scope: ${esc(r.scope)}</span>` : ""}
+      ${r.source ? `<span>Source: ${esc(r.source)}</span>` : ""}
+      <span>Updated: ${fmtTs(r.updated_at || r.created_at)}</span>
+      ${dossier}
+    </div>
+  </article>`;
+}
+
+// ── Belief dossier ───────────────────────────────────────────────────
+async function openDossier(etchId) {
+  busy(true);
+  try {
+    const d = await getJSON(`etch/${encodeURIComponent(etchId)}/dossier`);
+    renderDossier(d);
+    window.scrollTo({ top: 0 });
+  } catch (e) {
+    view.innerHTML = `<div class="notice error">Dossier failed: ${esc(e.message)}</div>`;
+  } finally { busy(false); }
+}
+
+function renderDossier(d) {
+  const e = d.etch;
+  const versions = [...(d.versions || [])].sort((a, b) => b.version - a.version);
+  const timeline = versions.length ? `
+    <ul class="timeline">${versions.map((v) => `
+      <li class="tl-item">
+        <div class="tl-head">
+          <span class="tl-version">Version ${v.version}</span>
+          <span class="badge ${esc(v.status)}">${esc(v.status)}</span>
+          <span class="tl-date">${fmtTs(v.created_at)} &middot; confidence ${pct(v.confidence)}%</span>
+        </div>
+        <div class="tl-value">${esc(v.current_value)}</div>
+        <div class="tl-narrative">${esc(v.narrative)}</div>
+      </li>`).join("")}
+    </ul>` : `<div class="notice">No recorded versions.</div>`;
+
+  const claims = (d.claims || []).length ? `
+    <table class="grid">
+      <thead><tr>
+        <th>Claimed value</th><th>Polarity</th>
+        <th class="num">Corroboration</th><th class="num">Confidence</th>
+        <th>Sources</th><th>First seen</th>
+      </tr></thead>
+      <tbody>${d.claims.map((c) => `
+        <tr>
+          <td>${esc(c.value)}</td>
+          <td>${esc(c.polarity)}</td>
+          <td class="num">${c.corroboration_count}&times;</td>
+          <td class="num">${pct(c.confidence)}%</td>
+          <td>${esc((c.sources || []).join(", ") || "—")}</td>
+          <td>${fmtTs(c.ingest_time || c.created_at)}</td>
+        </tr>`).join("")}
+      </tbody>
+    </table>` : `<div class="notice">No claims on record.</div>`;
+
+  const signals = d.signals_omitted
+    ? `<div class="notice">Raw signals are withheld: claims anonymization is
+       enabled on this server, and original signal text may contain personal data.</div>`
+    : ((d.signals || []).length ? d.signals.map((s) => `
+        <div class="sig">
+          <div class="sig-head">
+            <span>${esc(s.source)} &middot; ${esc(s.scope)}</span>
+            <span>${fmtTs(s.created_at)}</span>
+          </div>
+          <div class="sig-content">${esc(s.content)}</div>
+        </div>`).join("")
+      : `<div class="notice">No underlying signals on record.</div>`);
+
+  view.innerHTML = `
+    <div class="report">
+      <button class="back" id="back">&larr; Back to report</button>
+      <div class="report-kicker">Belief Dossier</div>
+      <h1 class="report-title">${esc(e.entity_name)}
+        <span style="color:var(--muted);font-weight:400">&mdash;
+        ${esc((e.property || "").replaceAll("_", " "))}</span></h1>
+      <dl class="meta-grid">
+        <div><dt>Status</dt><dd>${esc(e.status)}</dd></div>
+        <div><dt>Confidence</dt><dd>${pct(e.confidence)}%</dd></div>
+        <div><dt>Version</dt><dd>${e.version}</dd></div>
+        <div><dt>Generated</dt><dd>${new Date().toLocaleString()}</dd></div>
+      </dl>
+
+      <div class="summary-box">
+        <div class="belief-value" style="margin-top:0">${esc(e.current_value)}</div>
+        <div class="belief-narrative" style="margin-bottom:8px">${esc(e.narrative)}</div>
+        <div class="belief-foot">
+          ${e.scope ? `<span>Scope: ${esc(e.scope)}</span>` : ""}
+          <span>First etched: ${fmtTs(e.created_at)}</span>
+          <span>Last updated: ${fmtTs(e.updated_at)}</span>
+          <span class="mono">${esc(e.id)}</span>
+        </div>
+      </div>
+
+      <h2 class="section-h">Version history (${versions.length})</h2>
+      ${timeline}
+
+      <h2 class="section-h">Underlying claims (${(d.claims || []).length})</h2>
+      ${claims}
+
+      <h2 class="section-h">Source signals${d.signals_omitted ? "" : ` (${(d.signals || []).length})`}</h2>
+      ${signals}
+
+      <div class="toolbar">
+        <button class="btn ghost" onclick="window.print()">Print / Save as PDF</button>
+      </div>
+    </div>`;
+  $("foot-right").textContent =
+    `Dossier · ${e.id} · generated ${new Date().toLocaleString()}`;
+  $("back").addEventListener("click", () => {
+    if (state.lastReport) runReport();
+    else view.innerHTML = `<div class="notice">Enter a search string to generate a beliefs report.</div>`;
+  });
+}
+
+// ── Wiring ───────────────────────────────────────────────────────────
+view.addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-etch]");
+  if (b) openDossier(b.dataset.etch);
+});
+$("go").addEventListener("click", runReport);
+$("q").addEventListener("keydown", (ev) => { if (ev.key === "Enter") runReport(); });
+
+function busy(on) {
+  $("go").disabled = on;
+  $("go").textContent = on ? "Generating…" : "Generate report";
+}
+
+async function boot() {
+  renderCalendar();
+  try {
+    const [health, stats] = await Promise.all([getJSON("health"), getJSON("stats")]);
+    $("server-line").textContent = `etchmem-server v${health.version}`;
+    $("stats-line").textContent =
+      `${stats.etches} beliefs · ${stats.entities} entities · ${stats.contested} contested`;
+    for (const s of stats.scopes || []) {
+      const o = document.createElement("option");
+      o.value = s; o.textContent = s;
+      $("scope").appendChild(o);
+    }
+  } catch { /* header stays minimal if the API is unreachable */ }
+  $("q").focus();
+}
+boot();
+</script>
+</body>
+</html>

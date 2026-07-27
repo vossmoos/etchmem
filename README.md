@@ -155,11 +155,28 @@ its own container behind a real broker + Postgres/pgvector — see TODO.md.
 | `POST /sleep` | Run one worker tick now (batch → extract → fold). |
 | `POST /export` | Dump all etches to JSON files. |
 | `GET /etch/{id}/history` | Version timeline of one belief. |
+| `GET /etch/{id}/dossier` | Full provenance: etch + versions + claims + source signals. |
 | `GET /stats` | Queue depths + counts (signals/claims/entities/etches/contested). |
 | `GET /health` | Liveness + active config. |
+| `GET /ui` | **Etchmem Beliefs Explorer** — built-in report UI. |
 
 REST, any language, any agent framework. Interactive docs at
 `http://localhost:8000/docs`.
+
+## Beliefs Explorer (built-in UI)
+
+A single-page report interface at `http://localhost:8000/ui` — no build step,
+no extra service, served by the same process. Two report types:
+
+- **Beliefs report** — search string + as-of date (calendar; default today).
+  Today shows the live view including fresh signals; a past date reconstructs
+  what the system believed then via time-travel recall.
+- **Belief dossier** — click any belief for its full history: version
+  timeline, underlying claims (corroboration, polarity, sources), and the raw
+  source signals. When claims anonymization is on, raw signals are withheld.
+
+Export via the browser's *Print / Save as PDF* button (print stylesheet
+included). Disable the UI with `ETCHMEM_UI_ENABLED=false`.
 
 ## MCP interface
 

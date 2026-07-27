@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
+    # ── UI: Etchmem Beliefs Explorer at GET /ui ────────────────────────────
+    ui_enabled: bool = True
+
     # ── Derived helpers ────────────────────────────────────────────────────
     @property
     def multi_value_set(self) -> set[str]:
@@ -128,6 +131,7 @@ _ENV_ALIASES = {
     "signal_ttl_seconds": "ETCHMEM_SIGNAL_TTL_SECONDS",
     "host": "ETCHMEM_HOST",
     "port": "ETCHMEM_PORT",
+    "ui_enabled": "ETCHMEM_UI_ENABLED",
 }
 
 

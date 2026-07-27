@@ -299,6 +299,31 @@ class LeftStore:
                 [entity_id, prop]).fetchall()
         return [self._row_to_claim(r) for r in rows]
 
+    def claims_by_ids(self, ids: list[str]) -> list[Claim]:
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._con.execute(
+                f"""SELECT id, entity_id, entity_name, property, value, value_norm,
+                           polarity, event_time, ingest_time, sources,
+                           evidence_signal_ids, corroboration_count, confidence, scope,
+                           status, created_at, updated_at
+                    FROM claims WHERE id IN ({placeholders})""", ids).fetchall()
+        return [self._row_to_claim(r) for r in rows]
+
+    def signals_by_ids(self, ids: list[str]) -> list[Signal]:
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._con.execute(
+                f"""SELECT id, content, source, scope, metadata, embedding, created_at,
+                           expires_at, status, extract_mode, canonical_id
+                    FROM signals WHERE id IN ({placeholders})
+                    ORDER BY created_at""", ids).fetchall()
+        return [self._row_to_signal(r) for r in rows]
+
     def set_claims_status(self, ids: list[str], status: str) -> None:
         if not ids:
             return
