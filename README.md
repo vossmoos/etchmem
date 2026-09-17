@@ -57,6 +57,9 @@ See [TODO.md](TODO.md) for the product vision and planned capabilities.
 
 - **Signal** — a raw deposit (`source`, `scope`, text, embedding). Immutable.
   Call notes, tool outputs, emails, decisions — nothing to pre-structure.
+  Optionally carries `occurred_at`: when the content actually *happened*, as
+  distinct from when we received it. Required for historical loads — see
+  [Ingesting a historical archive](#ingesting-a-historical-archive).
 - **Claim** — one atomic typed assertion `(entity, property, value, polarity)`
   extracted from a signal. Append-only; identical claims merge as
   *corroboration* (counted, never discarded), so confidence reflects how many
@@ -112,6 +115,75 @@ properties:
     entity_types: [company]
 ```
 
+### Declaring entities
+
+`properties:` says what to extract. `entities:` says which **subjects** matter
+and how strictly to identify them — the difference between a corpus that
+consolidates and one that quietly merges two things into one:
+
+```yaml
+domain: catalogue-support
+entities:
+  - type: product
+    description: A module identified by its article number.
+    match: exact                       # never fuzzy-merge two products
+    identifier_pattern: '[A-Z]{2,4}[-\s]?\d{3,5}[A-Z]?'
+    sim_threshold: 0.97                # optional per-type override
+  - type: ticket
+    ignore: true                       # record ids are not knowledge
+```
+
+| Key | Effect |
+|-----|--------|
+| `identifier_pattern` | When it matches inside the surface name, the normalized match becomes the entity's **canonical key** and resolution is string equality. Fuzzy matching is skipped entirely. |
+| `match: exact` | Never resolve this type by embedding similarity, pattern or not. |
+| `sim_threshold` | Per-type override of `ETCHMEM_ENTITY_SIM_THRESHOLD`, for types that still resolve fuzzily. |
+| `ignore: true` | Drop claims about this subject type. The extractor is also told not to produce them. |
+
+### One subject per claim
+
+A claim has exactly one subject, and the extractor is told so: "A and B both
+fail" arrives as two claims, not one claim named `A und B`. That instruction is
+where the language understanding belongs — the extractor reads the whole
+sentence, with its grammar and its verb.
+
+When a claim arrives compound anyway, the engine does **not** try to take it
+apart. Whether `MSM-0808 und MSM-0810` is a list and `NT-2405 für MSM-0808` is a
+relation is a reading of the original sentence, and by the time a claim exists
+that sentence is gone. Inspecting the mangled name with a word list would decide
+a language question with strictly less information than the model already had,
+in one language at a time, and would need extending forever.
+
+So instead:
+
+1. **Detect structurally.** "Does `entity_name` carry more than one identifier?"
+   is a count. It behaves identically in German, French, Italian and Romansh,
+   with nothing to configure.
+2. **Ask the model again.** That one signal is re-read with a correction naming
+   exactly what went wrong, and the original sentence attached. Cheap, and only
+   for the rare malformed case — the same escalate-the-hard-ones principle as
+   the routing gate. `ETCHMEM_SUBJECT_RETRY_ENABLED=false` turns it off.
+3. **Drop what is still compound.** One retry, then the claim is dropped and
+   counted. Unattached beats attached to the wrong subject.
+
+`subject_retries` on every `/sleep` shows how often the extractor is producing
+malformed subjects; a rising number is a prompt problem, not a data problem.
+
+`distributive: true` marks a property that can legitimately hold for several
+subjects at once:
+
+```yaml
+properties:
+  - name: known_fault
+    distributive: true          # "A and B both leak" is two facts
+  - name: lifecycle_status
+    # absent: "A or B is discontinued" says ONE of them
+```
+
+It is passed to the model as guidance during the correction, never applied
+afterwards as a rule. The engine has no distribution step: several subjects
+means several claims *from the model*, or nothing.
+
 Declared properties are injected into the extractor's system prompt (so it
 actively looks for them) and **enforced on the way back**: a declared enum
 rejects drifting values (no `sales_intent: "very high"`), and `entity_types`
@@ -122,6 +194,168 @@ pass — the core stays open-vocabulary. Each declared property becomes a plain
 versioning as everything else. Extensions are additive vocabulary only; they
 never override the core triple. Edit or add files, then restart the server to
 pick up changes.
+
+## Ingesting a historical archive
+
+Loading years of existing records — support tickets, case notes, order history —
+has one failure mode that is silent and fatal, and one configuration answer.
+
+**Declare `occurred_at` on every signal.** A signal's `created_at` is always
+ingest time. Without `occurred_at`, a backfill run today gives *every* claim
+today's timestamp, the gate's recency policy has nothing to order by, and a 2009
+answer competes with a 2022 answer as an equal. The archive consolidates into
+nonsense that looks fine.
+
+```bash
+curl -X POST localhost:8000/remember -H 'content-type: application/json' -d '{
+  "data": "Modul MSM-0808: NT-2405 is the correct supply up to revision C.",
+  "source": "ticket-resolved", "scope": "innoxel",
+  "occurred_at": "2014-03-17"
+}'
+# → {"id": "...", "stored": true, "occurred_at": 1395014400.0,
+#    "occurred_at_declared": true}
+```
+
+The response echoes the parsed value, so a bulk load can assert the date was
+understood rather than discovering months later that it was not.
+
+Precedence, when both a declared `occurred_at` and an in-text date exist:
+
+| `ETCHMEM_OCCURRED_AT_PRECEDENCE` | Winner |
+|---|---|
+| `extracted` (default) | The date the extractor read from the text. More specific — a 2014 record may state something became true in 2009. |
+| `declared` | The caller's `occurred_at`, always. For bulk loads where the record date is authoritative and a misread date would corrupt the timeline silently. |
+
+**Guard the dedup.** Stage 1 collapses near-identical signals, which is an asset
+here (500 records of the same fault become one belief with corroboration 500) and
+a hazard across decades: archived records are formulaic, so two of them years
+apart can sit well inside the distance threshold while describing different
+things. `ETCHMEM_DEDUP_MAX_TIME_GAP_SECONDS` adds the missing condition — two
+signals further apart in event time than this are never the same signal:
+
+```
+ETCHMEM_DEDUP_MAX_TIME_GAP_SECONDS=604800     # 7 days; 0 = off (default)
+ETCHMEM_SIGNAL_DEDUP_DISTANCE=0.04            # tighter than the 0.08 default
+```
+
+**Check the entity declaration before loading anything.** Entity resolution is
+the failure that hurts most and shows least: two article numbers merging into
+one subject cross-contaminates two histories, and every answer afterwards looks
+plausible. `app.validate_entities` runs the declaration against real names and
+reports what would happen — exit code 1 gates a load in CI:
+
+```bash
+python -m app.validate_entities --names article-numbers.txt --type product
+```
+
+```
+AMBIGUOUS — two identifiers, no safe key (1)
+  - NT-2405 for MSM-0808   candidates: nt-2405, msm-0808
+NO MATCH — pattern found nothing (1)
+  - das alte Modul
+COLLISIONS — one key, several names (1)
+  msm-0808: MSM-0808, MSM 0808, INNOXEL Modul MSM-0808
+NEAR MISSES — keys one edit apart (1)
+  msm-0808  vs  msm-0809
+```
+
+Collisions are what you want (spelling variants of one article). Near misses are
+the pairs a similarity threshold would have been at risk of merging. Feed it real
+entity names from the archive, not just clean article numbers.
+
+**Watch the resolution counters.** Every `/sleep` reports how subjects were
+identified:
+
+```json
+"entities": {"entities_by_key": 812, "entities_by_fuzzy": 0,
+             "entities_created": 44, "entities_ambiguous": 3,
+             "entities_unmatched": 17, "entities_ignored": 900}
+```
+
+`by_fuzzy` above zero on a type you declared with an `identifier_pattern` means
+the pattern is not matching real names and identity has quietly gone back to
+guessing. `ambiguous` counts names carrying two identifiers — there is no safe
+key for those, so the fact stays unattached rather than attaching to the wrong
+subject; it is a prompt problem, not a data problem.
+
+**Validate the timeline before the full run.** Load a few hundred records
+spanning the whole period, then check that `claims.event_time` actually spans it
+rather than clustering on load day. If it clusters, nothing downstream is
+trustworthy and no amount of later tuning fixes it.
+
+## Relations: when the value is another entity
+
+Declare a property's value as a reference and it stops being a string:
+
+```yaml
+properties:
+  - name: fix_procedure
+    relation: part          # the value IS a part, resolved like any subject
+  - name: replaced_by
+    relation: part
+```
+
+Three things follow. The value goes through the same identifier rules as a
+subject, so `DK-1120` and `DK 1120` become one node instead of two values of one
+belief fighting at the gate. The edge is followable backwards —
+`etches_referencing(entity_id)` answers "which products are fixed by DK-1120?"
+as one indexed lookup rather than a text search. And `associate` can walk it.
+
+`relations_resolved` on every `/sleep` counts the edges built.
+
+## Three ways to ask
+
+| You know | Operation | Returns |
+|---|---|---|
+| the subject | `know(ref)` | every belief about it, exhaustive |
+| only words | `recall(query)` | beliefs ranked by wording |
+| only words, and want what they connect to | `associate(query)` | the above **plus** every fact of each matched subject **plus** the nodes they are linked to |
+
+`associate` is for the question "what do we have on this?" when you cannot name
+the thing. It seeds from beliefs whose narratives match, expands each matched
+subject to its full set of facts, then follows declared relations one hop in
+both directions.
+
+```python
+a = mem.associate("bathroom leaks")
+for n in a.nodes:
+    print(n["hops"], n["entity"]["name"], n["reached_via"])
+```
+
+The point is the hop. A fault matches by wording; the seal that fixes it shares
+no word with the query and is reachable only because the memory is connected.
+`min_score` (default 0.15) drops seeds that do not really match — `recall`
+returns `top_k` whatever the similarity, and a zero-scoring seed would drag its
+whole neighbourhood into the answer.
+
+## Recall vs. entity facts
+
+Two different questions, two different operations, and using the wrong one is a
+quiet source of wrong answers.
+
+`POST /recall` is **semantic search**: it ranks beliefs by embedding distance to
+a query and returns `top_k`. Right for "what do we know about leaking seals",
+where the caller cannot name the subject.
+
+`GET /entity/{ref}/etches` is **exhaustive**: every belief held about one
+subject, ordered by property. Right for "what do we know about MSM-0808". Recall
+would answer that too, but a fact whose narrative embeds poorly against the
+article number would simply be absent — and the caller cannot tell the
+difference between *not known* and *not ranked*. When an answer depends on
+completeness, rank is the wrong instrument.
+
+`ref` is an entity id (`product_msm_0808`) or a surface name (`MSM-0808`,
+`MSM 0808`, `INNOXEL Modul MSM-0808`), resolved exactly as ingestion resolved it,
+so callers never need the internal id format. `?as_of=` gives the beliefs as
+they stood then; the response carries a `contested` count so a caller can apply
+the settled/contested rule without walking the list.
+
+```python
+facts = mem.know("MSM-0808")
+for e in facts.settled(min_confidence=0.6):     # safe to state as fact
+    print(e.property, "=", e.current_value)
+print(facts.contested, "open questions")        # never in a customer reply
+```
 
 ## Explainability by construction
 
@@ -154,6 +388,8 @@ its own container behind a real broker + Postgres/pgvector — see TODO.md.
 | `POST /recall` | Semantic recall over beliefs; `as_of` for time-travel. |
 | `POST /sleep` | Run one worker tick now (batch → extract → fold). |
 | `POST /export` | Dump all etches to JSON files. |
+| `POST /associate` | What the memory holds for a phrase: matching beliefs, their subjects' facts, and connected nodes. |
+| `GET /entity/{ref}/etches` | **Every** belief about one subject — exhaustive, not ranked. |
 | `GET /etch/{id}/history` | Version timeline of one belief. |
 | `GET /etch/{id}/dossier` | Full provenance: etch + versions + claims + source signals. |
 | `GET /stats` | Queue depths + counts (signals/claims/entities/etches/contested). |

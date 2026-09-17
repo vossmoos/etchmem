@@ -49,8 +49,13 @@ class TickSummary:
     etches_formed: int = 0
     etches_updated: int = 0
     contested: int = 0
+    claims_dropped: int = 0          # subjects declared `ignore: true` in ext/
+    subject_retries: int = 0         # signals re-read after a compound entity_name
+    relations_resolved: int = 0      # claim values resolved to an entity (edges)
+    # How subjects were identified this tick — see entities.ResolutionStats.
+    entities: dict[str, int] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict:
         return self.__dict__.copy()
 
 
@@ -61,6 +66,27 @@ def _parse_event_time(iso: str | None, default: float) -> float:
         return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
     except Exception:
         return default
+
+
+def resolve_event_time(extracted_iso: str | None, signal) -> float:
+    """When did this claim's fact become true?
+
+    Three sources, most specific first:
+      1. a date the extractor read out of the signal text — a 2014 record may
+         state that something became true in 2009, and that is the truth the
+         gate's recency policy needs;
+      2. `occurred_at` declared by the caller on the signal;
+      3. ingest time.
+
+    Set ETCHMEM_OCCURRED_AT_PRECEDENCE=declared to invert 1 and 2 whenever the
+    signal carries a declared time: for a bulk backfill the record date is
+    authoritative, and an extractor misreading a date corrupts the timeline
+    silently, which is worse than losing the finer-grained date.
+    """
+    declared = signal.occurred_at or 0.0
+    if declared and settings.occurred_at_precedence == "declared":
+        return declared
+    return _parse_event_time(extracted_iso, signal.event_at)
 
 
 def _with_retry(fn):
@@ -95,7 +121,9 @@ class Pipeline:
         self._embed = embedder
         self._extractor = extractor
         self._resolver = resolver
-        self._entities = EntityResolver(stores.right, embedder)
+        from app.ext import load_extensions
+        self._registry = load_extensions()
+        self._entities = EntityResolver(stores.right, embedder, self._registry)
 
     # ── one full tick ──────────────────────────────────────────────────────
 
@@ -113,8 +141,11 @@ class Pipeline:
         new = self._s.left.signals_by_status(S_NEW)
         if not new:
             return
-        for group in group_duplicates(new, settings.signal_dedup_distance):
-            canonical = min(group, key=lambda s: s.created_at)
+        for group in group_duplicates(new, settings.signal_dedup_distance,
+                                      settings.dedup_max_time_gap_seconds):
+            # Earliest event, not earliest insertion: in a backfill the load
+            # order says nothing about which record came first.
+            canonical = min(group, key=lambda s: (s.event_at, s.created_at))
             for sig in group:
                 self._s.left.set_canonical(sig.id, canonical.id, S_BATCHED)
             summary.batched += len(group)
@@ -125,6 +156,7 @@ class Pipeline:
         batched = self._s.left.signals_by_status(S_BATCHED)
         if not batched:
             return
+        self._entities.stats.reset()
         representatives = [s for s in batched if s.canonical_id == s.id]
 
         now = time.time()
@@ -175,41 +207,120 @@ class Pipeline:
             sources = sorted({m.source for m in members})
             evidence_ids = sorted({m.id for m in members})
 
-            for ec in result.claims:
-                entity = self._entities.resolve(ec.entity_name, ec.entity_type, rep.scope)
-                display_name, value = entity.name, ec.value
-                if settings.claims_anonymization:
-                    label = ANON_ENTITY_LABELS.get(entity.type)
-                    if label:
-                        display_name = self._s.right.get_or_assign_anon_token(
-                            entity.id, label)
-                    value = scrub(value)
-                value_norm = normalize_value(value)
-                cid = claim_hash(entity.id, ec.property, value_norm, ec.polarity)
-                claim = Claim(
-                    id=cid,
-                    entity_id=entity.id,
-                    entity_name=display_name,
-                    property=ec.property,
-                    value=value,
-                    value_norm=value_norm,
-                    polarity=ec.polarity,
-                    event_time=_parse_event_time(ec.event_time, rep.created_at),
-                    ingest_time=now,
-                    sources=sources,
-                    evidence_signal_ids=evidence_ids,
-                    corroboration_count=len(evidence_ids),
-                    confidence=ec.confidence,
-                    scope=rep.scope,
-                    status=C_NEW,
-                    created_at=now,
-                    updated_at=now,
-                )
-                self._s.left.upsert_claim(claim)
-                summary.claims_written += 1
+            claims = self._repair_compound_subjects(rep, result.claims, summary)
+            for ec in claims:
+                subjects = self._subjects_for(ec, rep.scope)
+                if not subjects:
+                    # Ignored subject type, or a name we could not attach a fact
+                    # to safely. Unattached beats attached to the wrong thing.
+                    summary.claims_dropped += 1
+                    continue
+                for entity in subjects:
+                    self._write_claim(ec, entity, rep, sources, evidence_ids,
+                                      now, summary)
 
             self._s.left.set_signal_status([m.id for m in members], S_EXTRACTED)
             summary.extracted_signals += len(members)
+
+        summary.entities = self._entities.stats.to_dict()
+
+    def _compound(self, ec) -> bool:
+        """Does this claim name more than one subject? A count, not a judgement."""
+        return self._registry.subject_count(ec.entity_type, ec.entity_name) > 1
+
+    def _repair_compound_subjects(self, rep, claims, summary):
+        """Send a signal back to the model when it named several subjects at once.
+
+        Whether "A und B" is a list and "A für B" is a relation is a reading of
+        the original sentence. Inspecting the mangled entity_name with a word
+        list would decide that question with strictly less information than the
+        model already had, in one language at a time, and would need extending
+        forever. So the model is asked again, with the sentence and with what it
+        got wrong.
+
+        One retry. If the answer is still compound, the claim is dropped and
+        counted: unattached beats attached to the wrong subject.
+        """
+        bad = [c for c in claims if self._compound(c)]
+        if not bad or not settings.subject_retry_enabled:
+            return claims
+        try:
+            summary.subject_retries += 1
+            multi = sorted(n for n, sp in self._registry.by_name.items()
+                           if sp.distributive)
+            fixed = _with_retry(lambda: self._extractor.re_extract_subjects(
+                rep.content, [c.entity_name for c in bad], multi_subject_properties=multi))
+        except Exception:
+            log.exception("subject re-extraction failed; dropping compound claims")
+            return [c for c in claims if not self._compound(c)]
+        good = [c for c in claims if not self._compound(c)]
+        return good + [c for c in fixed.claims if not self._compound(c)]
+
+    def _subjects_for(self, ec, scope):
+        """The single subject one claim is about, or nothing.
+
+        There is no distribution step here by design. Whether a compound name
+        is a list ("A und B both leak") or a relation ("A for B") is a reading
+        of the original sentence, so the model decides it by emitting one claim
+        per subject. A name still carrying several identifiers after the retry
+        is malformed, and a malformed claim is dropped: unattached beats
+        attached to the wrong subject.
+        """
+        if self._compound(ec):
+            return []
+        one = self._entities.resolve(ec.entity_name, ec.entity_type, scope)
+        return [one] if one is not None else []
+
+    def _resolve_object(self, ec, scope):
+        """Resolve the VALUE of a declared relation into an entity.
+
+        Two things follow from this. The edge becomes followable in both
+        directions, and the value stops being a spelling: "NT 2405" and
+        "NT-2405" normalise to one entity id, so the gate sees one value rather
+        than a conflict between two.
+        """
+        rel_type = self._registry.relation_type(ec.property)
+        if not rel_type:
+            return None
+        if self._registry.subject_count(rel_type, ec.value) > 1:
+            return None          # several identifiers in one value: no safe edge
+        return self._entities.resolve(ec.value, rel_type, scope)
+
+    def _write_claim(self, ec, entity, rep, sources, evidence_ids, now, summary) -> None:
+        display_name, value = entity.name, ec.value
+        obj = self._resolve_object(ec, rep.scope)
+        if settings.claims_anonymization:
+            label = ANON_ENTITY_LABELS.get(entity.type)
+            if label:
+                display_name = self._s.right.get_or_assign_anon_token(entity.id, label)
+            value = scrub(value)
+        # A resolved object IS the normalised value: equality is entity identity.
+        value_norm = obj.id if obj is not None else normalize_value(value)
+        if obj is not None:
+            summary.relations_resolved += 1
+        cid = claim_hash(entity.id, ec.property, value_norm, ec.polarity)
+        claim = Claim(
+            id=cid,
+            entity_id=entity.id,
+            entity_name=display_name,
+            property=ec.property,
+            value=value,
+            value_norm=value_norm,
+            polarity=ec.polarity,
+            event_time=resolve_event_time(ec.event_time, rep),
+            ingest_time=now,
+            sources=sources,
+            evidence_signal_ids=evidence_ids,
+            corroboration_count=len(evidence_ids),
+            confidence=ec.confidence,
+            value_entity_id=obj.id if obj is not None else None,
+            scope=rep.scope,
+            status=C_NEW,
+            created_at=now,
+            updated_at=now,
+        )
+        self._s.left.upsert_claim(claim)
+        summary.claims_written += 1
 
     # ── Stage 3: fold claims → etches ────────────────────────────────────────
 
@@ -246,6 +357,8 @@ class Pipeline:
             else:
                 version, created_at, changed = existing.version, existing.created_at, False
 
+            object_ids = {c.value_entity_id for c in claims if c.value_entity_id}
+            value_entity_id = object_ids.pop() if len(object_ids) == 1 else None
             source_ids = sorted({sid for c in claims for sid in c.evidence_signal_ids})
             sources = sorted({s for c in claims for s in c.sources})
             new_claim_ids = [c.id for c in claims if c.status == C_NEW]
@@ -258,12 +371,17 @@ class Pipeline:
                 claim_ids=[c.id for c in claims], source_ids=source_ids,
                 created_at=created_at, updated_at=now,
                 embedding=self._embed.embed_one(narrative),
+                value_entity_id=value_entity_id,
             )
             self._s.right.upsert_etch(etch)
 
             if changed:
+                # When the newest fact behind this belief became true. Claims
+                # carry occurred_at / an extracted date, so this is the real
+                # timeline even when the records arrived late or out of order.
+                event_at = max((c.event_time for c in claims if c.event_time), default=now)
                 self._s.right.add_version(etch_id, version, value, status, confidence,
-                                          narrative, new_claim_ids, now)
+                                          narrative, new_claim_ids, now, event_at)
                 if existing is None:
                     summary.etches_formed += 1
                 else:
