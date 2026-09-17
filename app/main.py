@@ -30,6 +30,9 @@ from app.schemas import (
     DossierResponse, ExportResponse, HealthResponse, HistoryResponse, RecallRequest,
     RecallResponse, RememberRequest, RememberResponse, SleepResponse, StatsResponse,
     VersionOut,
+    KnowledgeResponse,
+    AssociateResponse,
+    AssociateRequest,
 )
 from app.mcp_server import mcp as mcp_server
 from app.service import MemoryService
@@ -70,20 +73,49 @@ app = FastAPI(
 
 @app.post("/remember", response_model=RememberResponse, status_code=202)
 def remember(req: RememberRequest) -> RememberResponse:
-    sig_id, stored = get_service().remember(
+    sig_id, stored, occurred_at = get_service().remember(
         data=req.data, source=req.source, scope=req.scope,
-        extract_mode=req.extract_mode, metadata=req.metadata)
+        extract_mode=req.extract_mode, metadata=req.metadata,
+        occurred_at=req.occurred_at)
     return RememberResponse(
         id=sig_id, stored=stored, status="new" if stored else "duplicate",
-        message="Accepted." if stored else "Already present (idempotent).")
+        message="Accepted." if stored else "Already present (idempotent).",
+        occurred_at=occurred_at, occurred_at_declared=bool(occurred_at))
 
 
 @app.post("/recall", response_model=RecallResponse)
 def recall(req: RecallRequest) -> RecallResponse:
     results = get_service().recall(
         query=req.query, scope=req.scope, source=req.source, top_k=req.top_k,
-        include_signals=req.include_signals, as_of=req.as_of)
+        include_signals=req.include_signals, as_of=req.as_of,
+        as_of_basis=req.as_of_basis)
     return RecallResponse(query=req.query, as_of=req.as_of, results=results)
+
+
+@app.post("/associate", response_model=AssociateResponse)
+def associate(req: AssociateRequest) -> AssociateResponse:
+    """What the memory holds for a phrase: matching beliefs, their subjects'
+    full facts, and the nodes those subjects are connected to."""
+    return get_service().associate(
+        query=req.query, scope=req.scope, top_k=req.top_k, hops=req.hops,
+        as_of=req.as_of, min_score=req.min_score, as_of_basis=req.as_of_basis)
+
+
+@app.get("/entity/{ref}/etches", response_model=KnowledgeResponse)
+def know(ref: str, as_of: str | None = None,
+         entity_type: str | None = None,
+         as_of_basis: str = "ingest") -> KnowledgeResponse:
+    """Every belief about one subject — exhaustive, not similarity-ranked.
+
+    `ref` is an entity id (`product_msm_0808`) or a surface name (`MSM-0808`,
+    `MSM 0808`), resolved the same way ingestion resolved it. `as_of` gives the
+    beliefs as they stood at that time.
+    """
+    facts = get_service().know(ref, as_of=as_of, entity_type=entity_type,
+                              as_of_basis=as_of_basis)
+    if facts is None:
+        raise HTTPException(status_code=404, detail=f"no entity matching {ref!r}")
+    return facts
 
 
 @app.post("/sleep", response_model=SleepResponse)

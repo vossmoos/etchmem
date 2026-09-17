@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # Cosine DISTANCE below which two raw signals are treated as duplicates
     # and collapsed onto one canonical representative (provenance preserved).
     signal_dedup_distance: float = 0.08
+    # Max separation in event time for two signals to be considered the same
+    # signal at all. 0 = disabled (time is ignored, the original behaviour).
+    # Set it when ingesting a historical archive: formulaic records years apart
+    # can embed almost identically, and collapsing them merges unrelated
+    # histories onto one representative.
+    dedup_max_time_gap_seconds: float = 0.0
 
     # ── Entity resolution ──────────────────────────────────────────────────
     # Cosine SIMILARITY above which two entity names are treated as the same
@@ -57,6 +63,24 @@ class Settings(BaseSettings):
     # A gap larger than `trust_gap` lets the gate resolve a conflict by trust.
     source_trust_json: str = "{}"
     trust_gap: float = 0.3
+
+    # ── Event time ─────────────────────────────────────────────────────────
+    # Which wins when a signal declares `occurred_at` AND the extractor reads a
+    # date out of the text:
+    #   "extracted" (default) — the in-text date wins. It is the more specific
+    #       claim: a 2014 ticket may state that a part was discontinued in 2009.
+    #   "declared" — the caller's occurred_at always wins. Use it for a bulk
+    #       backfill where the record date is authoritative and an extractor
+    #       misreading a date would silently corrupt the timeline.
+    occurred_at_precedence: str = "extracted"      # "extracted" | "declared"
+
+    # ── Malformed subjects ─────────────────────────────────────────────────
+    # A claim whose entity_name carries several identifiers cannot be attached
+    # to one subject. When true, that ONE signal is re-read by the model with a
+    # correction naming what went wrong — the sentence is the only place the
+    # answer exists. When false, or when the retry still comes back compound,
+    # the claim is dropped and counted rather than guessed at.
+    subject_retry_enabled: bool = True
 
     # ── Privacy: claims anonymization ──────────────────────────────────────
     # When true, personal data is anonymized as signals are folded into
@@ -116,10 +140,13 @@ _ENV_ALIASES = {
     "data_dir": "ETCHMEM_DATA_DIR",
     "ext_dir": "ETCHMEM_EXT_DIR",
     "signal_dedup_distance": "ETCHMEM_SIGNAL_DEDUP_DISTANCE",
+    "dedup_max_time_gap_seconds": "ETCHMEM_DEDUP_MAX_TIME_GAP_SECONDS",
+    "occurred_at_precedence": "ETCHMEM_OCCURRED_AT_PRECEDENCE",
     "entity_sim_threshold": "ETCHMEM_ENTITY_SIM_THRESHOLD",
     "multi_value_properties": "ETCHMEM_MULTI_VALUE_PROPERTIES",
     "source_trust_json": "ETCHMEM_SOURCE_TRUST_JSON",
     "trust_gap": "ETCHMEM_TRUST_GAP",
+    "subject_retry_enabled": "ETCHMEM_SUBJECT_RETRY_ENABLED",
     "claims_anonymization": "ETCHMEM_CLAIMS_ANONYMIZATION",
     "worker_enabled": "ETCHMEM_WORKER_ENABLED",
     "worker_interval_seconds": "ETCHMEM_WORKER_INTERVAL_SECONDS",

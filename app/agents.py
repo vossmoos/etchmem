@@ -54,8 +54,31 @@ A claim is one atomic fact: (entity, property, value). Rules:
 - One signal may yield several claims, or zero. If the signal states no durable
   fact (chatter, questions, greetings), return an empty list.
 - Set polarity = "negated" for explicit negations ("did NOT sign").
+- ONE SUBJECT PER CLAIM. If a sentence states something about several
+  subjects, emit one claim per subject, each named on its own. Never put two
+  subjects in one `entity_name`: "A and B both fail" is two claims. When a
+  sentence names one subject and mentions another as context ("part X for
+  machine Y"), decide which one the fact is about and name only that one.
 - Do NOT invent facts. Do NOT merge different entities.
 - If known entities are provided, reuse the exact name when it's the same one.
+"""
+
+
+_SUBJECT_CORRECTION = """
+
+CORRECTION. Your previous answer named SEVERAL subjects in one claim's
+`entity_name`: {names}. That is not answerable as one claim — a fact belongs to
+one subject.
+
+Re-read the signal and decide, from the sentence itself:
+- If it states the fact about EACH of them ("A and B both leak"), emit one
+  claim per subject, each `entity_name` carrying exactly one identifier.
+- If it names one subject and mentions the other as context ("part A for
+  machine B", "A replaces B"), emit one claim for the subject the fact is
+  actually about, and drop the other.
+- If the sentence does not make that clear, emit no claim for it.
+{ceiling}
+Never repeat a compound `entity_name`.
 """
 
 
@@ -91,6 +114,29 @@ class ClaimExtractor(ABC):
     ) -> list[ExtractionResult]:
         """Extract claims for several signals. Default: sequential fallback."""
         return [self.extract(t, known_entities) for t in signal_texts]
+
+    def re_extract_subjects(
+        self, signal_text: str, compound_names: list[str],
+        multi_subject_properties: list[str] | None = None,
+    ) -> ExtractionResult:
+        """Re-read ONE signal that produced a claim naming several subjects.
+
+        The model gets the original sentence back, plus what it got wrong. That
+        is the only place the question can be answered: whether "A und B" is a
+        list and "A für B" is a relation is a reading of the sentence, and by
+        the time a claim exists the sentence is gone. A word list inspecting the
+        mangled name would be guessing from strictly less information than the
+        model already had.
+
+        `multi_subject_properties` are the properties declared as legitimately
+        applying to several subjects at once. They are passed to the model as
+        guidance, never applied afterwards as a rule: a declaration cannot know
+        whether this particular sentence is a list or a relation.
+
+        Default implementation re-runs plain extraction, so stubs and simple
+        backends need no changes.
+        """
+        return self.extract(signal_text)
 
 
 class PydanticAIClaimExtractor(ClaimExtractor):
@@ -149,6 +195,27 @@ class PydanticAIClaimExtractor(ClaimExtractor):
             ]
             out[sc.signal_index].claims.extend(kept)
         return out
+
+    def re_extract_subjects(
+        self, signal_text: str, compound_names: list[str],
+        multi_subject_properties: list[str] | None = None,
+    ) -> ExtractionResult:
+        """Ask the model again, telling it exactly what it got wrong."""
+        ceiling = ""
+        if multi_subject_properties:
+            ceiling = ("\nThese properties may legitimately hold for several "
+                       "subjects at once: " + ", ".join(multi_subject_properties)
+                       + ". Any other property belongs to ONE subject.\n")
+        prompt = (f"## Signal\n\n{signal_text}"
+                  + _SUBJECT_CORRECTION.format(names="; ".join(compound_names),
+                                               ceiling=ceiling))
+        result = self._agent.run_sync(prompt).output
+        kept = [
+            c for c in result.claims
+            if self._registry.accept(property=c.property, value=c.value,
+                                     entity_type=c.entity_type)
+        ]
+        return ExtractionResult(claims=kept)
 
 
 # ── Stage 3: conflict resolution + narrative ─────────────────────────────────

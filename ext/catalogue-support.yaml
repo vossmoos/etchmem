@@ -1,0 +1,117 @@
+# Support-archive extension: a manufacturer's installed base, where the
+# subjects are catalogue identifiers and the corpus spans decades.
+#
+# Two things this file does that a properties-only extension cannot:
+#
+#   1. `identifier_pattern` makes article numbers resolve by STRING EQUALITY.
+#      Embedding similarity is the wrong tool here: "MSM-0808" and "MSM-0809"
+#      are different products and nearly identical strings, so any threshold
+#      loose enough to unify real name variants ("INNOXEL Modul MSM-0808",
+#      "MSM 0808") is also loose enough to merge two distinct articles. A
+#      merged entity silently cross-contaminates two product histories and
+#      produces confident, plausible, wrong answers.
+#
+#   2. `ignore: true` stops record identifiers becoming entities. A ticket
+#      number addresses a record; it is not a thing anyone will ever ask a
+#      question about, and without this a 25-year archive grows one junk
+#      entity per ticket.
+#
+# Adjust identifier_pattern to the real article-number grammar before use, and
+# test it against near-identical SKUs. Restart the server to pick up changes.
+domain: catalogue-support
+
+entities:
+  - type: product
+    description: >-
+      A module, device or unit that was sold and installed, identified by its
+      article number.
+    match: exact
+    identifier_pattern: '[A-Z]{2,4}[-\s]?\d{3,5}[A-Z]?'
+
+  - type: part
+    description: >-
+      A spare or wear part, identified by its article number.
+    match: exact
+    identifier_pattern: '[A-Z]{2,4}[-\s]?\d{3,5}[A-Z]?'
+
+  - type: document
+    description: >-
+      An installation sheet, manual or datasheet, identified by its document
+      number.
+    match: exact
+    identifier_pattern: '[A-Z]{2,4}-[A-Z0-9-]{3,}'
+
+  - type: ticket
+    description: A support case number. Addressing, not knowledge.
+    ignore: true
+
+  - type: order
+    description: An order or delivery-note number. Addressing, not knowledge.
+    ignore: true
+
+properties:
+  - name: lifecycle_status
+    description: >-
+      Whether this article can still be ordered: still sold, replaced by a
+      newer article, or no longer supplied. Use for any statement about
+      availability or discontinuation.
+    values: [active, superseded, discontinued, recalled]
+    entity_types: [product, part]
+
+  - name: replaced_by
+    description: >-
+      The article number that replaces this one. Capture the article number
+      exactly as written, never a product name.
+    entity_types: [product, part]
+    # The value is another article, not a literal. Resolving it makes the edge
+    # followable both ways ("what does NT-2405 replace?") and stops "NT 2405"
+    # and "NT-2405" counting as two different values of one belief.
+    relation: part
+
+  - name: fits_product
+    description: >-
+      A product or generation this part is confirmed to fit. A part fitting
+      several products is not a conflict.
+    entity_types: [part]
+    relation: product
+
+  - name: compatibility_limit
+    description: >-
+      A stated incompatibility - a generation, bus or product this article
+      does NOT work with. Held separately from fits_product so that a negative
+      can never be read as a positive.
+    entity_types: [product, part]
+    distributive: true
+
+  - name: installation_document
+    description: >-
+      The installation sheet, manual or datasheet that applies. Capture the
+      document number or its exact title.
+    entity_types: [product, part]
+    relation: document
+
+  - name: known_fault
+    description: A failure mode reported more than once. One fault per claim.
+    entity_types: [product, part]
+    # This fact can legitimately hold for several articles at once, so the
+    # extractor is told it may report it about each of them. GUIDANCE TO THE
+    # MODEL, never a rule applied afterwards: whether a sentence names a list
+    # ("A und B both leak") or a relation ("A for B") is a reading of that
+    # sentence, and the engine never decides it. lifecycle_status and
+    # replaced_by deliberately lack this - "A or B is discontinued" says one.
+    distributive: true
+
+  - name: fix_procedure
+    description: >-
+      The remedy that resolved a reported fault. When the remedy IS a part,
+      give that part's article number alone so the fault links to it.
+    entity_types: [product, part]
+    relation: part
+
+  - name: wiring_requirement
+    description: Bus, voltage or terminal requirement stated for this article.
+    entity_types: [product, part]
+
+  - name: firmware_baseline
+    description: Firmware or software version required or shipped.
+    entity_types: [product]
