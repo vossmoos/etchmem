@@ -1,6 +1,6 @@
 services:
   etchmem-server:
-    image: aolishchuk/etchmem:0.0.3
+    image: aolishchuk/etchmem:0.0.4
     container_name: etchmem-server
     ports:
       - "8000:8000"
