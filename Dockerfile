@@ -10,9 +10,10 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# To use the offline local embedding backend instead of OpenAI, uncomment:
-# COPY requirements-local.txt .
-# RUN pip install --no-cache-dir -r requirements-local.txt
+# Local embedding backend (sentence-transformers / MiniLM). Required when
+# EMBEDDING_PROVIDER=local (Kimchi has no embeddings API).
+COPY requirements-local.txt .
+RUN pip install --no-cache-dir -r requirements-local.txt
 
 COPY app ./app
 
