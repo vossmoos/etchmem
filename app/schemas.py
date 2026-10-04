@@ -63,6 +63,26 @@ class RecallRequest(BaseModel):
 
 
 
+class DetailItem(BaseModel):
+    """One labelled fact: `value` is the short label, `detail` the author's full
+    wording. Only properties declared `detail: true` carry these."""
+    value: str
+    detail: str
+
+
+class SourceEvidence(BaseModel):
+    source: str
+    trust: float                    # declared trust at fold time (0..1)
+    signals: int
+
+
+class EvidenceOut(BaseModel):
+    """What a confidence rests on, so the number can be explained or re-judged."""
+    signals: int = 0
+    sources: list[SourceEvidence] = Field(default_factory=list)
+    max_trust: float = 0.0
+
+
 class RecallResult(BaseModel):
     id: str
     content: str
@@ -77,6 +97,8 @@ class RecallResult(BaseModel):
     version: int | None = None
     scope: str | None = None
     source: str | None = None
+    details: list[DetailItem] = Field(default_factory=list)
+    evidence: EvidenceOut | None = None
     created_at: float = 0.0
     updated_at: float | None = None
 
@@ -122,6 +144,8 @@ class EtchOut(BaseModel):
     scope: str | None = None
     source: str | None = None
     value_entity_id: str | None = None
+    details: list[DetailItem] = Field(default_factory=list)
+    evidence: EvidenceOut | None = None
     claim_ids: list[str] = Field(default_factory=list)
     source_ids: list[str] = Field(default_factory=list)
     created_at: float
@@ -215,6 +239,8 @@ class VersionOut(BaseModel):
     status: str
     confidence: float
     narrative: str
+    details: list[DetailItem] = Field(default_factory=list)
+    evidence: EvidenceOut | None = None
     triggered_by: list[str] = Field(default_factory=list)
     created_at: float                  # when we learned it
     event_at: float = 0.0              # when the fact behind it became true
@@ -233,6 +259,7 @@ class ClaimOut(BaseModel):
     property: str
     value: str
     polarity: str
+    detail: str | None = None
     corroboration_count: int
     confidence: float
     sources: list[str] = Field(default_factory=list)
@@ -275,6 +302,10 @@ class StatsResponse(BaseModel):
     etches: int
     contested: int
     scopes: list[str]
+    sources_without_trust: list[str] = Field(
+        default_factory=list,
+        description="Deposit sources seen but not declared in a `sources:` block "
+                    "(or ETCHMEM_SOURCE_TRUST_JSON). They get the default trust.")
 
 
 class HealthResponse(BaseModel):

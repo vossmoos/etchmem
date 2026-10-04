@@ -61,8 +61,15 @@ class Settings(BaseSettings):
     multi_value_properties: str = ""
     # Optional source-trust weights as JSON, e.g. {"crm":1.0,"agent-33":0.6}.
     # A gap larger than `trust_gap` lets the gate resolve a conflict by trust.
-    source_trust_json: str = "{}"
+    source_trust_json: str = "{}"          # overrides the `sources:` block of ext/*.yaml
     trust_gap: float = 0.3
+    # ── Evidence-based confidence ──────────────────────────────────────────
+    # Trust of a source that nobody declared. 0.5 means "one unknown source
+    # is a coin flip", which is also what the old formula gave it.
+    default_source_trust: float = 0.5
+    # Each further signal from the SAME source counts this much of the previous
+    # one: repetition helps, but never like an independent witness.
+    evidence_repeat_decay: float = 0.5
 
     # ── Event time ─────────────────────────────────────────────────────────
     # Which wins when a signal declares `occurred_at` AND the extractor reads a
@@ -146,6 +153,8 @@ _ENV_ALIASES = {
     "multi_value_properties": "ETCHMEM_MULTI_VALUE_PROPERTIES",
     "source_trust_json": "ETCHMEM_SOURCE_TRUST_JSON",
     "trust_gap": "ETCHMEM_TRUST_GAP",
+    "default_source_trust": "ETCHMEM_DEFAULT_SOURCE_TRUST",
+    "evidence_repeat_decay": "ETCHMEM_EVIDENCE_REPEAT_DECAY",
     "subject_retry_enabled": "ETCHMEM_SUBJECT_RETRY_ENABLED",
     "claims_anonymization": "ETCHMEM_CLAIMS_ANONYMIZATION",
     "worker_enabled": "ETCHMEM_WORKER_ENABLED",

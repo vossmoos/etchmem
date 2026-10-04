@@ -29,7 +29,7 @@ from app.config import settings
 from app.dedup import group_duplicates
 from app.entities import EntityResolver
 from app.embeddings import EmbeddingProvider
-from app.gate import ROUTE_CONTESTED, route_and_resolve
+from app.gate import ROUTE_CONTESTED, route_and_resolve, select_details
 from app.hashing import claim_hash
 from app.stores import (
     C_NEW, C_CONSOLIDATED, S_BATCHED, S_EXTRACTED, S_NEW,
@@ -296,6 +296,13 @@ class Pipeline:
             value = scrub(value)
         # A resolved object IS the normalised value: equality is entity identity.
         value_norm = obj.id if obj is not None else normalize_value(value)
+        # The full wording rides next to the label, only where the property
+        # declares it; it never takes part in the claim's identity.
+        detail = (ec.detail or "").strip() or None
+        if detail and not self._registry.has_detail(ec.property):
+            detail = None
+        if detail and settings.claims_anonymization:
+            detail = scrub(detail)
         if obj is not None:
             summary.relations_resolved += 1
         cid = claim_hash(entity.id, ec.property, value_norm, ec.polarity)
@@ -314,6 +321,7 @@ class Pipeline:
             corroboration_count=len(evidence_ids),
             confidence=ec.confidence,
             value_entity_id=obj.id if obj is not None else None,
+            detail=detail,
             scope=rep.scope,
             status=C_NEW,
             created_at=now,
@@ -324,6 +332,20 @@ class Pipeline:
 
     # ── Stage 3: fold claims → etches ────────────────────────────────────────
 
+    def source_trust(self) -> dict[str, float]:
+        """Declared trust per source: the ext `sources:` block, env on top."""
+        return {**self._registry.source_trust, **settings.source_trust}
+
+    def _signal_sources(self, claims) -> dict[str, str]:
+        """signal id → source for the evidence behind these claims.
+
+        Lets the gate tell ten signals from one source (one witness, repeated)
+        from ten sources. Signals purged by TTL are simply absent; the gate
+        still counts each claim's recorded sources once.
+        """
+        ids = sorted({sid for c in claims for sid in c.evidence_signal_ids})
+        return {s.id: s.source for s in self._s.left.signals_by_ids(ids)}
+
     def fold_pass(self, summary: TickSummary) -> None:
         for entity_id, prop in self._s.left.pairs_with_new_claims():
             claims = self._s.left.claims_for_pair(entity_id, prop)
@@ -332,7 +354,9 @@ class Pipeline:
             summary.pairs_folded += 1
             entity_name = claims[0].entity_name
             scope = claims[0].scope
-            decision = route_and_resolve(prop, claims)
+            decision = route_and_resolve(
+                prop, claims, trust=self.source_trust(),
+                signal_sources=self._signal_sources(claims))
 
             if decision.route == ROUTE_CONTESTED:
                 res = self._resolver.resolve(entity_name, prop, decision.competing)
@@ -346,13 +370,22 @@ class Pipeline:
                 confidence = decision.confidence
                 narrative = f"{entity_name} — {prop.replace('_', ' ')}: {value}."
 
+            evidence = decision.evidence
+            details = select_details(prop, claims, value)
+            if details:
+                # The narrative is what recall embeds and returns, so it carries
+                # the wording, not just the labels.
+                narrative = (f"{entity_name} — {prop.replace('_', ' ')}: "
+                             + "; ".join(f"{d['value']} — {d['detail']}" for d in details) + ".")
+
             etch_id = f"{entity_id}::{prop}"
             existing = self._s.right.get_etch(etch_id)
             now = time.time()
 
             if existing is None:
                 version, created_at, changed = 1, now, True
-            elif existing.current_value != value or existing.status != status:
+            elif (existing.current_value != value or existing.status != status
+                  or existing.details != details):
                 version, created_at, changed = existing.version + 1, existing.created_at, True
             else:
                 version, created_at, changed = existing.version, existing.created_at, False
@@ -371,7 +404,8 @@ class Pipeline:
                 claim_ids=[c.id for c in claims], source_ids=source_ids,
                 created_at=created_at, updated_at=now,
                 embedding=self._embed.embed_one(narrative),
-                value_entity_id=value_entity_id,
+                value_entity_id=value_entity_id, details=details,
+                evidence=evidence,
             )
             self._s.right.upsert_etch(etch)
 
@@ -381,7 +415,8 @@ class Pipeline:
                 # timeline even when the records arrived late or out of order.
                 event_at = max((c.event_time for c in claims if c.event_time), default=now)
                 self._s.right.add_version(etch_id, version, value, status, confidence,
-                                          narrative, new_claim_ids, now, event_at)
+                                          narrative, new_claim_ids, now, event_at, details,
+                                          evidence)
                 if existing is None:
                     summary.etches_formed += 1
                 else:

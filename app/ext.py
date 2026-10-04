@@ -41,6 +41,18 @@ ceiling on what the model is allowed to spread, never a way of detecting it:
 deciding whether a sentence names a list or a relation is language
 understanding, and it belongs to the extractor that read the sentence.
 
+A property may declare `detail: true`. Its claims then carry two texts: the
+`value` is a short LABEL (the claim's identity: dedup, corroboration, the gate
+and confidence all work on it) and `detail` is the author's full wording. The
+detail is not part of identity; when a label is asserted again the detail with
+the latest event time wins. `label_hint` / `detail_hint` steer the extractor
+for that property. Without `detail: true` nothing changes.
+
+A top-level `sources:` block declares how far each deposit source is believed
+(`name: {trust: 0..1, description}` or `name: 0.9`). Confidence is built from it,
+see README "Confidence". It is declared here, by the domain owner, and never
+accepted from the depositing caller.
+
 `kind: attribute` is reserved for non-belief annotations (a sidecar that should
 NOT go through conflict resolution). It is parsed and surfaced in the registry
 but, until a generic `attributes` column exists, is not yet persisted — only
@@ -77,6 +89,11 @@ class PropSpec:
     # "NT 2405" and "NT-2405" stop being two values of one belief, and the edge
     # can be followed in both directions.
     relation: str | None = None
+    # True when the VALUE is only a short label and the full wording travels in
+    # `detail` (see module docstring). Identity stays on the label.
+    detail: bool = False
+    label_hint: str = ""
+    detail_hint: str = ""
     domain: str = ""
 
 
@@ -124,10 +141,31 @@ def normalize_identifier(raw: str) -> str:
     return _IDENT_PUNCT.sub("-", raw.strip()).replace("--", "-").lower()
 
 
+@dataclass(frozen=True)
+class SourceSpec:
+    """How far a deposit source is believed (0..1), declared by the domain owner.
+
+    The `source` string is whatever the depositor sends with `remember`. Trust
+    is decided here, server-side, never by the caller and never by the model:
+    a caller that could state its own trust would state 0.99.
+    """
+    name: str
+    trust: float
+    description: str = ""
+    domain: str = ""
+
+
 @dataclass
 class ExtRegistry:
     specs: list[PropSpec] = field(default_factory=list)
     entities: list[EntitySpec] = field(default_factory=list)
+    sources: list[SourceSpec] = field(default_factory=list)
+
+    # ── sources ────────────────────────────────────────────────────────────
+
+    @property
+    def source_trust(self) -> dict[str, float]:
+        return {s.name: s.trust for s in self.sources}
 
     # ── properties ─────────────────────────────────────────────────────────
 
@@ -153,6 +191,15 @@ class ExtRegistry:
             if s.relation:
                 line += (f" The VALUE is another {s.relation}: give its"
                          " identifier alone, no surrounding words.")
+            if s.detail:
+                line += (" WITH DETAIL: `value` is a short LABEL naming the fact"
+                         " (2-5 words, canonical, the same label every time the"
+                         " same fact comes up)"
+                         + (f" — {s.label_hint}" if s.label_hint else "")
+                         + "; `detail` is the full wording as the author"
+                         " stated it, one or two sentences, keeping the correct"
+                         " facts and conditions"
+                         + (f" — {s.detail_hint}" if s.detail_hint else "") + ".")
             lines.append(line)
         return (
             "\n\nExtended properties — when the signal supports them, extract "
@@ -292,6 +339,11 @@ class ExtRegistry:
         spec = self.by_name.get(property)
         return spec.relation if spec else None
 
+    def has_detail(self, property: str) -> bool:
+        """Does this property carry a full-wording `detail` next to its label?"""
+        spec = self.by_name.get(property)
+        return bool(spec and spec.detail)
+
     def distributes(self, property: str) -> bool:
         """May a fact about several subjects be written to each of them?
 
@@ -323,6 +375,9 @@ def _coerce_spec(raw: dict, domain: str) -> PropSpec:
         description=str(raw.get("description", "")).strip(),
         kind=str(raw.get("kind", "property")).strip().lower(),
         distributive=bool(raw.get("distributive", False)),
+        detail=bool(raw.get("detail", False)),
+        label_hint=str(raw.get("label_hint", "")).strip(),
+        detail_hint=str(raw.get("detail_hint", "")).strip(),
         relation=(str(raw["relation"]).strip() if raw.get("relation") else None),
         values=tuple(str(v).strip().lower() for v in vals) if vals else None,
         entity_types=tuple(str(v).strip() for v in ents) if ents else None,
@@ -347,6 +402,22 @@ def _coerce_entity(raw: dict, domain: str) -> EntitySpec:
     )
 
 
+def _coerce_source(name: str, raw, domain: str) -> SourceSpec | None:
+    """`name: {trust: 0.9, description: ...}` or the short form `name: 0.9`."""
+    name = name.strip()
+    if isinstance(raw, dict):
+        value, desc = raw.get("trust"), str(raw.get("description", "")).strip()
+    else:
+        value, desc = raw, ""
+    try:
+        trust = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not name or not 0.0 <= trust <= 1.0:
+        return None
+    return SourceSpec(name=name, trust=trust, description=desc, domain=domain)
+
+
 def load_extensions(path: str | None = None) -> ExtRegistry:
     """Read every *.yaml / *.yml in `path` into a registry. Last file wins on
     duplicate property / entity-type names. Missing folder → empty registry."""
@@ -354,10 +425,11 @@ def load_extensions(path: str | None = None) -> ExtRegistry:
         from app.config import settings
         path = settings.ext_dir
     if not path or not os.path.isdir(path):
-        return ExtRegistry([], [])
+        return ExtRegistry([], [], [])
 
     props: dict[str, PropSpec] = {}
     ents: dict[str, EntitySpec] = {}
+    srcs: dict[str, SourceSpec] = {}
     for fp in sorted(glob.glob(os.path.join(path, "*.yml"))
                      + glob.glob(os.path.join(path, "*.yaml"))):
         with open(fp, "r", encoding="utf-8") as f:
@@ -373,4 +445,8 @@ def load_extensions(path: str | None = None) -> ExtRegistry:
                 continue
             espec = _coerce_entity(raw, domain)
             ents[espec.type] = espec
-    return ExtRegistry(list(props.values()), list(ents.values()))
+        for name, raw in (doc.get("sources") or {}).items():
+            sspec = _coerce_source(str(name), raw, domain)
+            if sspec is not None:
+                srcs[sspec.name] = sspec
+    return ExtRegistry(list(props.values()), list(ents.values()), list(srcs.values()))

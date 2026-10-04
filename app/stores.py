@@ -77,6 +77,9 @@ class Claim:
     corroboration_count: int = 1
     confidence: float = 0.5
     value_entity_id: str | None = None      # set when `property` is a relation
+    # Full wording behind the label in `value`, for properties declared
+    # `detail: true`. Not part of the claim's identity.
+    detail: str | None = None
     scope: str | None = None
     status: str = C_NEW
     created_at: float = 0.0
@@ -116,6 +119,12 @@ class Etch:
     # Set when `property` is a declared relation: the entity this belief points
     # at. Turns the etch from an edge into a literal into a real graph edge.
     value_entity_id: str | None = None
+    # [{"value": label, "detail": full wording}], for `detail: true` properties.
+    # `current_value` stays the label(s); this carries the wording.
+    details: list[dict] = field(default_factory=list)
+    # What the confidence rests on: {"signals", "sources": [{source, trust,
+    # signals}], "max_trust"}. Computed at fold time with the trust declared then.
+    evidence: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -137,11 +146,12 @@ def _u(s: str | None, default: Any) -> Any:
 _CLAIM_COLS = """id, entity_id, entity_name, property, value, value_norm,
                 polarity, event_time, ingest_time, sources,
                 evidence_signal_ids, corroboration_count, confidence, scope,
-                status, created_at, updated_at, value_entity_id"""
+                status, created_at, updated_at, value_entity_id, detail"""
 
 _ETCH_COLS = """id, entity_id, entity_name, property, current_value, status,
                 confidence, narrative, version, scope, source, claim_ids,
-                source_ids, created_at, updated_at, embedding, value_entity_id"""
+                source_ids, created_at, updated_at, embedding, value_entity_id,
+                details, evidence"""
 
 
 # ── Left store ───────────────────────────────────────────────────────────────
@@ -186,6 +196,7 @@ class LeftStore:
                     corroboration_count INTEGER,
                     confidence          DOUBLE,
                     value_entity_id     VARCHAR,
+                    detail              VARCHAR,
                     scope               VARCHAR,
                     status              VARCHAR,
                     created_at          DOUBLE,
@@ -210,6 +221,8 @@ class LeftStore:
         ccols = {r[1] for r in self._con.execute("PRAGMA table_info('claims')").fetchall()}
         if "value_entity_id" not in ccols:
             self._con.execute("ALTER TABLE claims ADD COLUMN value_entity_id VARCHAR")
+        if "detail" not in ccols:
+            self._con.execute("ALTER TABLE claims ADD COLUMN detail VARCHAR")
 
     # ── signals ──────────────────────────────────────────────────────────
 
@@ -298,32 +311,38 @@ class LeftStore:
         """Insert a claim, or merge corroboration into an existing one."""
         with self._lock:
             existing = self._con.execute(
-                """SELECT sources, evidence_signal_ids, corroboration_count, event_time
+                """SELECT sources, evidence_signal_ids, corroboration_count, event_time,
+                          detail
                    FROM claims WHERE id = ?""", [claim.id]).fetchone()
             if existing:
                 sources = sorted(set(_u(existing[0], []) + claim.sources))
                 evidence = sorted(set(_u(existing[1], []) + claim.evidence_signal_ids))
                 count = len(evidence)
                 event_time = max(existing[3] or 0.0, claim.event_time)
+                # Same label, possibly new wording: the newest wording wins. An
+                # older signal arriving late never overwrites a newer detail.
+                detail = existing[4]
+                if claim.detail and (not detail or claim.event_time >= (existing[3] or 0.0)):
+                    detail = claim.detail
                 self._con.execute(
                     """UPDATE claims SET sources = ?, evidence_signal_ids = ?,
-                       corroboration_count = ?, event_time = ?, status = ?,
+                       corroboration_count = ?, event_time = ?, detail = ?, status = ?,
                        updated_at = ? WHERE id = ?""",
-                    [_j(sources), _j(evidence), count, event_time, C_NEW,
+                    [_j(sources), _j(evidence), count, event_time, detail, C_NEW,
                      time.time(), claim.id])
             else:
                 self._con.execute(
                     """INSERT INTO claims (id, entity_id, entity_name, property, value,
                         value_norm, polarity, event_time, ingest_time, sources,
                         evidence_signal_ids, corroboration_count, confidence, scope,
-                        status, created_at, updated_at, value_entity_id)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        status, created_at, updated_at, value_entity_id, detail)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [claim.id, claim.entity_id, claim.entity_name, claim.property,
                      claim.value, claim.value_norm, claim.polarity, claim.event_time,
                      claim.ingest_time, _j(claim.sources), _j(claim.evidence_signal_ids),
                      claim.corroboration_count, claim.confidence, claim.scope,
                      claim.status, claim.created_at, claim.updated_at,
-                     claim.value_entity_id])
+                     claim.value_entity_id, claim.detail])
 
     def pairs_with_new_claims(self) -> list[tuple[str, str]]:
         with self._lock:
@@ -388,6 +407,12 @@ class LeftStore:
                 "SELECT DISTINCT scope FROM signals WHERE scope IS NOT NULL").fetchall()
         return sorted(r[0] for r in rows)
 
+    def sources(self) -> list[str]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT DISTINCT source FROM signals WHERE source IS NOT NULL").fetchall()
+        return sorted(r[0] for r in rows)
+
     # ── row mappers ──────────────────────────────────────────────────────
 
     @staticmethod
@@ -405,7 +430,7 @@ class LeftStore:
             value_norm=r[5], polarity=r[6], event_time=r[7], ingest_time=r[8],
             sources=_u(r[9], []), evidence_signal_ids=_u(r[10], []),
             corroboration_count=r[11], confidence=r[12], scope=r[13], status=r[14],
-            created_at=r[15], updated_at=r[16], value_entity_id=r[17])
+            created_at=r[15], updated_at=r[16], value_entity_id=r[17], detail=r[18])
 
 
 # ── Right store ──────────────────────────────────────────────────────────────
@@ -448,7 +473,9 @@ class RightStore:
                     created_at   DOUBLE,
                     updated_at   DOUBLE,
                     embedding    FLOAT[{self._dim}],
-                    value_entity_id VARCHAR
+                    value_entity_id VARCHAR,
+                    details      VARCHAR,
+                    evidence     VARCHAR
                 );
                 CREATE TABLE IF NOT EXISTS etch_versions (
                     etch_id      VARCHAR,
@@ -460,6 +487,8 @@ class RightStore:
                     narrative    VARCHAR,
                     triggered_by VARCHAR,
                     created_at   DOUBLE,
+                    details      VARCHAR,
+                    evidence     VARCHAR,
                     PRIMARY KEY (etch_id, version)
                 );
                 CREATE TABLE IF NOT EXISTS anon_tokens (
@@ -479,8 +508,16 @@ class RightStore:
         cols = {r[1] for r in self._con.execute("PRAGMA table_info('etches')").fetchall()}
         if "value_entity_id" not in cols:
             self._con.execute("ALTER TABLE etches ADD COLUMN value_entity_id VARCHAR")
+        if "details" not in cols:
+            self._con.execute("ALTER TABLE etches ADD COLUMN details VARCHAR")
+        if "evidence" not in cols:
+            self._con.execute("ALTER TABLE etches ADD COLUMN evidence VARCHAR")
         vcols = {r[1] for r in
                  self._con.execute("PRAGMA table_info('etch_versions')").fetchall()}
+        if "details" not in vcols:
+            self._con.execute("ALTER TABLE etch_versions ADD COLUMN details VARCHAR")
+        if "evidence" not in vcols:
+            self._con.execute("ALTER TABLE etch_versions ADD COLUMN evidence VARCHAR")
         if "event_at" not in vcols:
             # Older rows only know when we learned it. Seeding event_at from
             # created_at makes event-basis time travel degrade to ingest-basis
@@ -578,15 +615,17 @@ class RightStore:
                 f"""INSERT INTO etches (id, entity_id, entity_name, property,
                     current_value, status, confidence, narrative, version, scope,
                     source, claim_ids, source_ids, created_at, updated_at, embedding,
-                    value_entity_id)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::FLOAT[{self._dim}],?)""",
+                    value_entity_id, details, evidence)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::FLOAT[{self._dim}],?,?,?)""",
                 [e.id, e.entity_id, e.entity_name, e.property, e.current_value, e.status,
                  e.confidence, e.narrative, e.version, e.scope, e.source,
                  _j(e.claim_ids), _j(e.source_ids), e.created_at, e.updated_at,
-                 e.embedding, e.value_entity_id])
+                 e.embedding, e.value_entity_id, _j(e.details), _j(e.evidence)])
 
     def add_version(self, etch_id, version, value, status, confidence, narrative,
-                    triggered_by, created_at, event_at: float | None = None) -> None:
+                    triggered_by, created_at, event_at: float | None = None,
+                    details: list[dict] | None = None,
+                    evidence: dict | None = None) -> None:
         """Snapshot one belief change.
 
         `created_at` is when we learned it; `event_at` is when the newest fact
@@ -599,21 +638,24 @@ class RightStore:
                               [etch_id, version])
             self._con.execute(
                 """INSERT INTO etch_versions (etch_id, version, current_value, status,
-                    confidence, narrative, triggered_by, created_at, event_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                    confidence, narrative, triggered_by, created_at, event_at, details,
+                    evidence)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 [etch_id, version, value, status, confidence, narrative,
-                 _j(triggered_by), created_at, event_at or created_at])
+                 _j(triggered_by), created_at, event_at or created_at,
+                 _j(details or []), _j(evidence or {})])
 
     def versions(self, etch_id: str) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._con.execute(
                 """SELECT version, current_value, status, confidence, narrative,
-                          triggered_by, created_at, event_at
+                          triggered_by, created_at, event_at, details, evidence
                    FROM etch_versions WHERE etch_id = ? ORDER BY version""",
                 [etch_id]).fetchall()
         return [{"version": r[0], "current_value": r[1], "status": r[2],
                  "confidence": r[3], "narrative": r[4], "triggered_by": _u(r[5], []),
-                 "created_at": r[6], "event_at": r[7]} for r in rows]
+                 "created_at": r[6], "event_at": r[7], "details": _u(r[8], []),
+                 "evidence": _u(r[9], {})} for r in rows]
 
     def version_as_of(self, etch_id: str, as_of: float,
                       basis: str = "ingest") -> dict[str, Any] | None:
@@ -631,7 +673,7 @@ class RightStore:
         with self._lock:
             r = self._con.execute(
                 f"""SELECT version, current_value, status, confidence, narrative,
-                           triggered_by, created_at, event_at
+                           triggered_by, created_at, event_at, details, evidence
                     FROM etch_versions WHERE etch_id = ? AND {column} <= ?
                     ORDER BY {column} DESC, version DESC LIMIT 1""",
                 [etch_id, as_of]).fetchone()
@@ -639,7 +681,8 @@ class RightStore:
             return None
         return {"version": r[0], "current_value": r[1], "status": r[2],
                 "confidence": r[3], "narrative": r[4], "triggered_by": _u(r[5], []),
-                "created_at": r[6], "event_at": r[7]}
+                "created_at": r[6], "event_at": r[7], "details": _u(r[8], []),
+                "evidence": _u(r[9], {})}
 
     def search_etches(self, qvec, top_k, scope=None) -> list[Hit]:
         clauses, params = ["embedding IS NOT NULL"], []
@@ -650,17 +693,18 @@ class RightStore:
             rows = self._con.execute(
                 f"""SELECT id, entity_id, entity_name, property, current_value, status,
                            confidence, narrative, version, scope, source, created_at,
-                           updated_at,
+                           updated_at, details, evidence,
                            array_cosine_similarity(embedding, ?::FLOAT[{self._dim}]) AS sim
                     FROM etches WHERE {where} ORDER BY sim DESC LIMIT ?""",
                 [qvec, *params, top_k]).fetchall()
         out = []
         for r in rows:
-            out.append(Hit(r[0], r[7], float(r[13]), {
+            out.append(Hit(r[0], r[7], float(r[15]), {
                 "entity_id": r[1], "entity_name": r[2], "property": r[3],
                 "current_value": r[4], "status": r[5], "confidence": r[6],
                 "version": r[8], "scope": r[9], "source": r[10],
-                "created_at": r[11], "updated_at": r[12]}))
+                "created_at": r[11], "updated_at": r[12],
+                "details": _u(r[13], []), "evidence": _u(r[14], {})}))
         return out
 
     def etches_for_entity(self, entity_id: str) -> list[Etch]:
@@ -708,7 +752,8 @@ class RightStore:
                     version=r[8], scope=r[9], source=r[10], claim_ids=_u(r[11], []),
                     source_ids=_u(r[12], []), created_at=r[13], updated_at=r[14],
                     embedding=list(r[15]) if r[15] is not None else None,
-                    value_entity_id=r[16])
+                    value_entity_id=r[16], details=_u(r[17], []),
+                    evidence=_u(r[18], {}))
 
 
 # ── Container ────────────────────────────────────────────────────────────────

@@ -32,6 +32,10 @@ class ExtractedClaim(BaseModel):
     value: str = Field(..., description="Short canonical value, e.g. 'signed', 'broken'. Prefer 1-3 words.")
     polarity: Literal["asserted", "negated"] = "asserted"
     event_time: str | None = Field(None, description="ISO-8601 time the fact became true, if stated.")
+    detail: str | None = Field(
+        None,
+        description="Only for properties marked WITH DETAIL: the full wording of the fact "
+                    "as the author stated it. Leave empty for every other property.")
     confidence: float = Field(0.7, ge=0.0, le=1.0, description="Extraction confidence.")
 
 
@@ -51,6 +55,8 @@ A claim is one atomic fact: (entity, property, value). Rules:
   (e.g. contract_status, pricing_tier, decision_maker, relationship_health).
 - Use a SHORT canonical `value` (1-3 words, lowercase where natural) so that
   equal facts get equal values (e.g. always "signed", not "signed the deal").
+  Exception: a property marked WITH DETAIL takes a 2-5 word LABEL as `value`
+  and the author's full wording in `detail`. Never fill `detail` otherwise.
 - One signal may yield several claims, or zero. If the signal states no durable
   fact (chatter, questions, greetings), return an empty list.
 - Set polarity = "negated" for explicit negations ("did NOT sign").
