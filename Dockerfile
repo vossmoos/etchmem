@@ -10,8 +10,9 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Local embedding backend (sentence-transformers / MiniLM). Required when
-# EMBEDDING_PROVIDER=local (Kimchi has no embeddings API).
+# Local embedding backend (fastembed / ONNX — no PyTorch). Required when
+# EMBEDDING_PROVIDER=local (Kimchi has no embeddings API). Model weights
+# download on first use into ETCHMEM_DATA_DIR/fastembed (PVC).
 COPY requirements-local.txt .
 RUN pip install --no-cache-dir -r requirements-local.txt
 

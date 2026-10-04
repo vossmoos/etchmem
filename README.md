@@ -539,7 +539,11 @@ uvicorn app.main:app --reload
 Via environment / `.env` (see `.env.example`). Highlights:
 
 - `ETCHMEM_CLAIM_MODEL` / `ETCHMEM_ETCH_MODEL` — cascade model strings.
-- `EMBEDDING_PROVIDER` — `openai` (default), `local`, or `fake` (tests).
+- `EMBEDDING_PROVIDER` — `openai` (default), `local` (fastembed/ONNX; needs
+  `requirements-local.txt`), or `fake` (tests).
+- `LOCAL_EMBEDDING_MODEL` — default
+  `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`. Weights cache
+  under `$ETCHMEM_DATA_DIR/fastembed`.
 - `ETCHMEM_SIGNAL_DEDUP_DISTANCE`, `ETCHMEM_ENTITY_SIM_THRESHOLD` — dedup and
   entity-merge thresholds.
 - `ETCHMEM_MULTI_VALUE_PROPERTIES` — properties that union instead of conflict.
