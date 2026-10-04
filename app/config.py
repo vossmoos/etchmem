@@ -28,7 +28,10 @@ class Settings(BaseSettings):
     # ── Embeddings ─────────────────────────────────────────────────────────
     embedding_provider: str = "openai"          # "openai" | "local" | "fake"
     openai_embedding_model: str = "text-embedding-3-small"
-    local_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # Multilingual MiniLM via fastembed/ONNX (see requirements-local.txt).
+    local_embedding_model: str = (
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    )
 
     # ── Storage ────────────────────────────────────────────────────────────
     data_dir: str = "./data"

@@ -5,7 +5,8 @@ The rest of the app talks only to the EmbeddingProvider ABC, never to a
 specific SDK. Two built-in backends:
 
   - OpenAIEmbedding  (default)  — text-embedding-3-small, 1536 dims.
-  - LocalEmbedding              — sentence-transformers, fully offline.
+  - LocalEmbedding              — fastembed / ONNX, fully offline after
+                                  the model weights are cached.
 
 A `FakeEmbedding` is provided for tests / offline CI (deterministic hash).
 
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 from app.config import settings
 
@@ -77,22 +79,27 @@ class OpenAIEmbedding(EmbeddingProvider):
         return [d.embedding for d in resp.data]
 
 
-# ── Local (sentence-transformers) ────────────────────────────────────────────
+# ── Local (fastembed / ONNX — no PyTorch) ────────────────────────────────────
 
 class LocalEmbedding(EmbeddingProvider):
     name = "local"
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, cache_dir: str | None = None) -> None:
         self._model_name = model
+        self._cache_dir = cache_dir
         self._model = None
         self._dim_cached: int | None = None
 
     def _ensure_model(self):
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
+            from fastembed import TextEmbedding
 
-            self._model = SentenceTransformer(self._model_name)
-            self._dim_cached = self._model.get_sentence_embedding_dimension()
+            kwargs: dict = {"model_name": self._model_name}
+            if self._cache_dir:
+                Path(self._cache_dir).mkdir(parents=True, exist_ok=True)
+                kwargs["cache_dir"] = self._cache_dir
+            self._model = TextEmbedding(**kwargs)
+            self._dim_cached = int(self._model.embedding_size)
         return self._model
 
     @property
@@ -105,8 +112,9 @@ class LocalEmbedding(EmbeddingProvider):
         if not texts:
             return []
         model = self._ensure_model()
-        vecs = model.encode(texts, normalize_embeddings=False)
-        return [v.tolist() for v in vecs]
+        # Empty strings can confuse tokenizers; keep a single space.
+        clean = [t if t.strip() else " " for t in texts]
+        return [vec.tolist() for vec in model.embed(clean)]
 
 
 # ── Fake (deterministic, offline; tests/CI) ──────────────────────────────────
@@ -142,7 +150,8 @@ def build_embedder() -> EmbeddingProvider:
     if provider == "openai":
         return OpenAIEmbedding(settings.openai_embedding_model, settings.openai_api_key)
     if provider == "local":
-        return LocalEmbedding(settings.local_embedding_model)
+        cache = str(Path(settings.data_dir) / "fastembed")
+        return LocalEmbedding(settings.local_embedding_model, cache_dir=cache)
     if provider == "fake":
         return FakeEmbedding()
     raise ValueError(f"Unknown embedding provider: {settings.embedding_provider!r}")
