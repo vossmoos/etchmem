@@ -106,6 +106,8 @@ class MemoryService:
             content, status, value, confidence, version = (
                 h.content, h.row["status"], h.row["current_value"],
                 h.row["confidence"], h.row["version"])
+            details = h.row.get("details") or []
+            evidence = h.row.get("evidence") or None
             updated_at = h.row.get("updated_at")
             if as_of_ts is not None:
                 snap = self.stores.right.version_as_of(h.id, as_of_ts, as_of_basis)
@@ -114,6 +116,8 @@ class MemoryService:
                 content, status, confidence, version = (
                     snap["narrative"], snap["status"], snap["confidence"], snap["version"])
                 value = snap["current_value"]
+                details = snap.get("details") or []
+                evidence = snap.get("evidence") or None
                 updated_at = snap["created_at"]
             results[h.id] = RecallResult(
                 id=h.id, content=content, score=h.similarity, origin="etch",
@@ -121,6 +125,7 @@ class MemoryService:
                 entity_name=h.row.get("entity_name"), property=h.row.get("property"),
                 value=value, status=status, confidence=confidence, version=version,
                 scope=h.row.get("scope"), source=h.row.get("source"),
+                details=details, evidence=evidence,
                 created_at=h.row.get("created_at", 0.0), updated_at=updated_at)
 
         if include_signals and as_of_ts is None:
@@ -150,7 +155,8 @@ class MemoryService:
                 id=e.id, entity_name=e.entity_name, property=e.property,
                 current_value=e.current_value, status=e.status, confidence=e.confidence,
                 narrative=e.narrative, version=e.version, scope=e.scope, source=e.source,
-                value_entity_id=e.value_entity_id,
+                value_entity_id=e.value_entity_id, details=e.details,
+                evidence=e.evidence or None,
                 claim_ids=e.claim_ids, source_ids=e.source_ids,
                 created_at=e.created_at, updated_at=e.updated_at)
             with open(os.path.join(export_dir, f"{e.id.replace('::', '__')}.json"),
@@ -180,7 +186,8 @@ class MemoryService:
         for e in self.stores.right.etches_for_entity(entity.id):
             value, status, confidence, version = (
                 e.current_value, e.status, e.confidence, e.version)
-            narrative, updated_at = e.narrative, e.updated_at
+            narrative, updated_at, details = e.narrative, e.updated_at, e.details
+            evidence = e.evidence or None
             if as_of_ts is not None:
                 snap = self.stores.right.version_as_of(e.id, as_of_ts, as_of_basis)
                 if snap is None:
@@ -188,13 +195,16 @@ class MemoryService:
                 value, status = snap["current_value"], snap["status"]
                 confidence, version = snap["confidence"], snap["version"]
                 narrative, updated_at = snap["narrative"], snap["created_at"]
+                details = snap.get("details") or []
+                evidence = snap.get("evidence") or None
             if status == "contested":
                 contested += 1
             out.append(EtchOut(
                 id=e.id, entity_name=e.entity_name, property=e.property,
                 current_value=value, status=status, confidence=confidence,
                 narrative=narrative, version=version, scope=e.scope,
-                source=e.source, value_entity_id=e.value_entity_id,
+                source=e.source, value_entity_id=e.value_entity_id, details=details,
+                evidence=evidence,
                 claim_ids=e.claim_ids, source_ids=e.source_ids,
                 created_at=e.created_at, updated_at=updated_at))
         return KnowledgeResponse(
@@ -324,14 +334,15 @@ class MemoryService:
             id=e.id, entity_name=e.entity_name, property=e.property,
             current_value=e.current_value, status=e.status, confidence=e.confidence,
             narrative=e.narrative, version=e.version, scope=e.scope, source=e.source,
-            value_entity_id=e.value_entity_id,
+            value_entity_id=e.value_entity_id, details=e.details,
+            evidence=e.evidence or None,
             claim_ids=e.claim_ids, source_ids=e.source_ids,
             created_at=e.created_at, updated_at=e.updated_at)
         versions = [VersionOut(**v) for v in self.stores.right.versions(etch_id)]
         claims = [
             ClaimOut(
                 id=c.id, entity_name=c.entity_name, property=c.property,
-                value=c.value, polarity=c.polarity,
+                value=c.value, polarity=c.polarity, detail=c.detail,
                 corroboration_count=c.corroboration_count, confidence=c.confidence,
                 sources=c.sources, evidence_signal_ids=c.evidence_signal_ids,
                 scope=c.scope, event_time=c.event_time, ingest_time=c.ingest_time,
@@ -367,7 +378,13 @@ class MemoryService:
             "etches": self.stores.right.count_etches(),
             "contested": self.stores.right.count_contested(),
             "scopes": left.scopes(),
+            "sources_without_trust": self._sources_without_trust(),
         }
+
+    def _sources_without_trust(self) -> list[str]:
+        from app.ext import load_extensions
+        declared = {**load_extensions().source_trust, **settings.source_trust}
+        return [s for s in self.stores.left.sources() if s not in declared]
 
     # ── internals ────────────────────────────────────────────────────────────
 

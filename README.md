@@ -195,6 +195,39 @@ versioning as everything else. Extensions are additive vocabulary only; they
 never override the core triple. Edit or add files, then restart the server to
 pick up changes.
 
+### Label + detail: a short name with the author's full wording
+
+A fact's `value` has to stay short: it is the claim's identity, so dedup,
+corroboration, the gate and confidence all work on it. But some facts need the
+author's full wording too ("avoid the core-product framing — this campaign is
+about CAST Radar, the new product"). Declare the property with `detail: true`:
+
+```yaml
+properties:
+  - name: known_fault            # customer-care tickets
+    detail: true
+    label_hint:  "short fault name, e.g. 'overnight battery drain'"
+    detail_hint: "the symptom as the customer described it plus the confirmed cause"
+  - name: resolution
+    detail: true
+    label_hint:  "the fix in a few words, e.g. 'firmware 2.3.1 update'"
+    detail_hint: "the exact steps that worked, with conditions and caveats"
+```
+
+The extractor then returns a 2-5 word **label** as `value` and the full wording
+as `detail`. The label decides identity: the same label from a second ticket
+is corroboration (confidence rises), not a new claim. The detail is not part of
+the claim hash. When a label is asserted again, the detail with the **latest
+event time** wins, and older wordings stay in the version history. An older
+signal arriving late never overwrites a newer wording.
+
+`current_value` keeps the label(s). The wording is in `details`
+(`[{"value": label, "detail": wording}]`) on recall, `know`, `export`,
+`/history` and the dossier, one entry per label for multi-value properties,
+and in the etch's narrative so recall matches on it. Properties without
+`detail: true` behave exactly as before, and a `detail` the model emits for
+one of them is dropped.
+
 ## Ingesting a historical archive
 
 Loading years of existing records — support tickets, case notes, order history —
@@ -561,3 +594,72 @@ etchmem is open source — clone it, ship it, never talk to us. If you want it
 integrated into your agent stack faster (signal capture design, consolidation
 policy tuning, scoped knowledge across teams, recall wiring), we do
 fixed-scope implementations: [etchmem.io](https://etchmem.io).
+
+## Confidence: who said it, and how many independent witnesses
+
+A settled etch's confidence is built from evidence, deterministically and without
+an LLM (`app/gate.py`):
+
+```python
+# per source: its declared trust; repeats from the SAME source count decay^(k-1)
+effective  = (1 - decay**n) / (1 - decay)            # n signals from this source
+belief_s   = 1 - (1 - trust_s) ** effective
+strength   = 1 - prod(1 - belief_s)                  # independent sources, noisy-OR
+confidence = clamp(agreement * strength * penalty, 0.05, 0.99)
+```
+
+`agreement` and `penalty` are unchanged (recency 0.85, source-trust win 0.9,
+contested fallback 0.5). `decay` is `ETCHMEM_EVIDENCE_REPEAT_DECAY` (default 0.5).
+
+| evidence | confidence |
+|---|---|
+| 1 signal, source trust 0.9 | 0.90 |
+| 1 signal, source nobody declared (default 0.5) | 0.50 |
+| 2 independent sources at 0.5 | 0.75 |
+| 3 signals from one 0.5 source | 0.70 |
+
+One deposit that yields several labels is one witness, not several (evidence is
+counted by signal id). A source whose signals were purged by the TTL still counts
+once, so confidence does not collapse when old signals expire.
+
+### Declaring source trust
+
+Trust is the domain owner's call, declared next to the vocabulary it governs, and
+never supplied by the depositing caller or the model:
+
+```yaml
+# ext/care.yaml
+sources:
+  kb.article:         {trust: 0.9, description: published knowledge-base article}
+  ticket.agent_closed: 0.8                   # short form
+  chat.bot:           {trust: 0.4}
+```
+
+The keys are the `source` strings sent with `remember`. A source nobody declared gets
+`ETCHMEM_DEFAULT_SOURCE_TRUST` (0.5, the same value a single source scored before).
+`ETCHMEM_SOURCE_TRUST_JSON` still works as an override on top of the YAML. `/stats`
+lists `sources_without_trust`: deposit sources seen but not declared, so a new channel
+does not quietly sit at the default. Renaming a source in the depositor resets its trust.
+
+### Evidence in the API
+
+`recall`, `know`, `export`, the dossier and `/history` return an `evidence` block next
+to `confidence`, with the trust that was declared when the belief was folded:
+
+```json
+{"confidence": 0.9,
+ "evidence": {"signals": 1, "max_trust": 0.9,
+              "sources": [{"source": "slack.reject", "trust": 0.9, "signals": 1}]}}
+```
+
+A consumer can use the number, or apply its own rule on the evidence ("only inject
+lessons backed by a source above 0.8").
+
+### TODO
+
+- Existing etches keep their old confidence and have no `evidence` until their
+  (entity, property) pair is next folded; add a recompute endpoint if that matters.
+- The extractor's self-reported claim `confidence` is stored but not used: an LLM
+  rating its own certainty is poorly calibrated. Revisit with a calibration set.
+- etchmem does not authenticate sources: a caller that can reach `remember` can
+  use any `source` string, including a trusted one.
