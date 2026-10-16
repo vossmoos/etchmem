@@ -341,6 +341,7 @@ as one indexed lookup rather than a text search. And `associate` can walk it.
 | You know | Operation | Returns |
 |---|---|---|
 | the subject | `know(ref)` | every belief about it, exhaustive |
+| the kind of belief (scope, property, subject type) | `etches(scope, property, entity_type)` | every matching belief across subjects, exhaustive, paged |
 | only words | `recall(query)` | beliefs ranked by wording |
 | only words, and want what they connect to | `associate(query)` | the above **plus** every fact of each matched subject **plus** the nodes they are linked to |
 
@@ -423,6 +424,7 @@ its own container behind a real broker + Postgres/pgvector — see TODO.md.
 | `POST /export` | Dump all etches to JSON files. |
 | `POST /associate` | What the memory holds for a phrase: matching beliefs, their subjects' facts, and connected nodes. |
 | `GET /entity/{ref}/etches` | **Every** belief about one subject — exhaustive, not ranked. |
+| `GET /etches` | **Every** belief matching filters — `scope`, `property`, `entity_type` (repeat or comma-separate), `status`, `min_confidence`; paged with `limit`/`offset`, `total` counts all matches. Writes nothing to disk. |
 | `GET /etch/{id}/history` | Version timeline of one belief. |
 | `GET /etch/{id}/dossier` | Full provenance: etch + versions + claims + source signals. |
 | `GET /stats` | Queue depths + counts (signals/claims/entities/etches/contested). |
@@ -450,7 +452,7 @@ included). Disable the UI with `ETCHMEM_UI_ENABLED=false`.
 ## MCP interface
 
 The same operations are exposed as **MCP tools** — `remember`, `recall`,
-`sleep`, `export`, `stats`, `etch_history` — over streamable HTTP at
+`know`, `etches`, `associate`, `sleep`, `export`, `stats`, `etch_history` — over streamable HTTP at
 `http://localhost:8000/mcp` (stateless, JSON responses). One process serves
 both protocols, so Claude Code / Claude Desktop / any MCP client can use
 etchmem as a memory backend directly:

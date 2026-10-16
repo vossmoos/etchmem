@@ -21,10 +21,24 @@ from app.embeddings import EmbeddingProvider, build_embedder
 from app.hashing import content_hash
 from app.schemas import (
     AssociateNode, AssociateResponse, ClaimOut, DossierResponse, EdgeOut,
-    KnowledgeResponse, EntityOut, EtchOut, RecallResult, SignalOut, VersionOut,
+    EtchListResponse, KnowledgeResponse, EntityOut, EtchOut, ListedEtchOut, RecallResult,
+    SignalOut, VersionOut,
 )
 from app.stores import S_BATCHED, S_EXTRACTED, S_NEW, Signal, Stores
 from app.worker import Pipeline
+
+
+ETCHES_DEFAULT_LIMIT = 500
+ETCHES_MAX_LIMIT = 2000
+
+
+def _as_list(value: str | list[str] | None) -> list[str] | None:
+    """A filter given as one name, a comma-separated string or a list → a list, or None."""
+    if value is None:
+        return None
+    items = [value] if isinstance(value, str) else value
+    out = [part.strip() for v in items for part in str(v).split(",") if part.strip()]
+    return out or None
 
 
 def parse_timestamp(value: str | float | None) -> float | None:
@@ -164,6 +178,37 @@ class MemoryService:
                 json.dump(eo.model_dump(), fh, indent=2, ensure_ascii=False)
             out.append(eo)
         return export_dir, out
+
+    # ── etches (filtered list) ───────────────────────────────────────────────
+
+    def etches(self, *, scope: str | None = None,
+               property: str | list[str] | None = None,
+               entity_type: str | list[str] | None = None,
+               status: str | None = None,
+               min_confidence: float | None = None,
+               limit: int = ETCHES_DEFAULT_LIMIT, offset: int = 0) -> EtchListResponse:
+        """Every belief matching the filters, newest first, one page at a time.
+
+        For "all incorrect_assumption beliefs in scope X": exhaustive where
+        `recall` ranks and cuts at top_k, and across subjects where `know`
+        covers one. Unlike `export` it filters and writes nothing to disk.
+        """
+        limit = max(1, min(int(limit), ETCHES_MAX_LIMIT))
+        offset = max(0, int(offset))
+        rows, total = self.stores.right.list_etches(
+            scope=scope or None, properties=_as_list(property),
+            entity_types=_as_list(entity_type), status=status or None,
+            min_confidence=min_confidence, limit=limit, offset=offset)
+        out = [ListedEtchOut(
+            id=e.id, entity_name=e.entity_name, entity_type=etype, property=e.property,
+            current_value=e.current_value, status=e.status, confidence=e.confidence,
+            narrative=e.narrative, version=e.version, scope=e.scope, source=e.source,
+            value_entity_id=e.value_entity_id, details=e.details,
+            evidence=e.evidence or None,
+            claim_ids=e.claim_ids, source_ids=e.source_ids,
+            created_at=e.created_at, updated_at=e.updated_at) for e, etype in rows]
+        return EtchListResponse(etches=out, count=len(out), total=total,
+                                limit=limit, offset=offset)
 
     # ── know ─────────────────────────────────────────────────────────
 

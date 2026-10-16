@@ -10,6 +10,8 @@ Tools:
   remember      — deposit a raw signal
   recall        — semantic recall over etches (+ time-travel via as_of)
   sleep         — run one worker tick now (batch → extract → fold)
+  know          — every belief about one subject
+  etches        — every belief matching filters (scope, property, entity type...)
   export        — dump all etches to JSON files
   stats         — queue depths + counts
   etch_history  — version timeline of one etch
@@ -25,7 +27,9 @@ mcp = FastMCP(
     instructions=(
         "etchmem is a knowledge consolidation engine: deposit raw experience "
         "with `remember`, let the pipeline fold it into consolidated, versioned "
-        "beliefs (etches), and query them with `recall`. Use `sleep` to force "
+        "beliefs (etches), and query them with `recall` (ranked by wording), `know` "
+        "(one subject, exhaustive) or `etches` (filtered by scope, property and "
+        "entity type, exhaustive). Use `sleep` to force "
         "a consolidation tick, `stats` for queue depths, `etch_history` for "
         "the version timeline of one belief."
     ),
@@ -128,6 +132,29 @@ def know(
     if facts is None:
         return {"error": f"no entity matching {ref!r}", "etches": []}
     return facts.model_dump()
+
+
+@mcp.tool()
+def etches(
+    scope: str | None = None,
+    property: str | list[str] | None = None,
+    entity_type: str | list[str] | None = None,
+    status: Literal["settled", "contested"] | None = None,
+    min_confidence: float | None = None,
+    limit: int = 500,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """EVERY belief matching the filters — exhaustive, not ranked, across subjects.
+
+    Use this for "all <property> beliefs in <scope>", e.g. every
+    incorrect_assumption for one tenant: scope='reportingmonetization',
+    property='incorrect_assumption'. `property` and `entity_type` take one name
+    or a list. Newest first; `total` counts every match, so page with `offset`
+    until offset + count >= total (`limit` is capped at 2000). `recall` ranks by
+    wording and cuts at top_k; `know` covers one subject; this filters."""
+    return _svc().etches(scope=scope, property=property, entity_type=entity_type,
+                         status=status, min_confidence=min_confidence,
+                         limit=limit, offset=offset).model_dump()
 
 
 @mcp.tool()
