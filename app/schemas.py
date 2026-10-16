@@ -158,6 +158,25 @@ class ExportResponse(BaseModel):
     etches: list[EtchOut]
 
 
+# ── etches (filtered list) ───────────────────────────────────────────────────
+
+class ListedEtchOut(EtchOut):
+    entity_type: str | None = None
+
+
+class EtchListResponse(BaseModel):
+    """Beliefs matching plain filters — exhaustive within them, not ranked.
+
+    `total` counts every match; `etches` is the page at `offset`. Page on until
+    `offset + count >= total`.
+    """
+    etches: list[ListedEtchOut] = Field(default_factory=list)
+    count: int = 0
+    total: int = 0
+    limit: int
+    offset: int = 0
+
+
 # ── know ─────────────────────────────────────────────────────────────
 
 class EntityOut(BaseModel):

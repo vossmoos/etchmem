@@ -5,6 +5,7 @@ Endpoints:
   POST /remember          — deposit a raw signal (source + scope; extract_mode)
   POST /recall            — semantic recall over etches (+ time-travel via as_of)
   POST /sleep             — run one worker tick now (batch → extract → fold)
+  GET  /etches            — every etch matching filters (scope, property, entity_type...)
   POST /export            — dump all etches to JSON files
   GET  /stats             — queue depths + counts
   GET  /health            — liveness + active config
@@ -22,12 +23,12 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from app import __version__
 from app.config import settings
 from app.schemas import (
-    DossierResponse, ExportResponse, HealthResponse, HistoryResponse, RecallRequest,
+    DossierResponse, EtchListResponse, ExportResponse, HealthResponse, HistoryResponse, RecallRequest,
     RecallResponse, RememberRequest, RememberResponse, SleepResponse, StatsResponse,
     VersionOut,
     KnowledgeResponse,
@@ -116,6 +117,24 @@ def know(ref: str, as_of: str | None = None,
     if facts is None:
         raise HTTPException(status_code=404, detail=f"no entity matching {ref!r}")
     return facts
+
+
+@app.get("/etches", response_model=EtchListResponse)
+def etches(scope: str | None = None,
+           property: list[str] | None = Query(default=None),
+           entity_type: list[str] | None = Query(default=None),
+           status: str | None = None,
+           min_confidence: float | None = None,
+           limit: int = 500, offset: int = 0) -> EtchListResponse:
+    """Every belief matching the filters — exhaustive, not similarity-ranked.
+
+    `property` and `entity_type` repeat (`?property=a&property=b`) or take a
+    comma-separated list. Newest first; page with `offset` until
+    `offset + count >= total`.
+    """
+    return get_service().etches(scope=scope, property=property, entity_type=entity_type,
+                                status=status, min_confidence=min_confidence,
+                                limit=limit, offset=offset)
 
 
 @app.post("/sleep", response_model=SleepResponse)

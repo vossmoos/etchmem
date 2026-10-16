@@ -721,6 +721,47 @@ class RightStore:
                     ORDER BY property""", [entity_id]).fetchall()
         return [self._row_to_etch(r) for r in rows]
 
+    def list_etches(self, *, scope: str | None = None,
+                    properties: list[str] | None = None,
+                    entity_types: list[str] | None = None,
+                    status: str | None = None,
+                    min_confidence: float | None = None,
+                    limit: int = 500, offset: int = 0,
+                    ) -> tuple[list[tuple[Etch, str | None]], int]:
+        """Beliefs matching plain filters, newest first, with the subject's type.
+
+        Exhaustive within the filters, unlike `search_etches`: "every
+        incorrect_assumption in scope X" is a WHERE clause, not a similarity
+        ranking, so nothing drops out because its narrative embeds poorly.
+        Returns one page and the total match count, for paging.
+        """
+        clauses, params = [], []
+        if scope:
+            clauses.append("e.scope = ?"); params.append(scope)
+        if properties:
+            clauses.append(f"e.property IN ({', '.join('?' * len(properties))})")
+            params.extend(properties)
+        if entity_types:
+            clauses.append(f"n.type IN ({', '.join('?' * len(entity_types))})")
+            params.extend(entity_types)
+        if status:
+            clauses.append("e.status = ?"); params.append(status)
+        if min_confidence is not None:
+            clauses.append("e.confidence >= ?"); params.append(min_confidence)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        cols = ", ".join(f"e.{c.strip()}" for c in _ETCH_COLS.split(","))
+        with self._lock:
+            total = int(self._con.execute(
+                f"""SELECT count(*) FROM etches e
+                    LEFT JOIN entities n ON n.id = e.entity_id {where}""",
+                params).fetchone()[0])
+            rows = self._con.execute(
+                f"""SELECT {cols}, n.type FROM etches e
+                    LEFT JOIN entities n ON n.id = e.entity_id {where}
+                    ORDER BY e.updated_at DESC, e.id LIMIT ? OFFSET ?""",
+                [*params, limit, offset]).fetchall()
+        return [(self._row_to_etch(r), r[-1]) for r in rows], total
+
     def all_etches(self) -> list[Etch]:
         with self._lock:
             rows = self._con.execute(

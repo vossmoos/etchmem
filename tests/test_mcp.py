@@ -19,7 +19,8 @@ from app.agents import (                               # noqa: E402
 from app.embeddings import FakeEmbedding               # noqa: E402
 from app.service import MemoryService                  # noqa: E402
 
-EXPECTED_TOOLS = {"remember", "recall", "sleep", "export", "stats", "etch_history"}
+EXPECTED_TOOLS = {"remember", "recall", "know", "etches", "sleep", "export", "stats",
+                  "etch_history"}
 
 
 class StubExtractor(ClaimExtractor):
