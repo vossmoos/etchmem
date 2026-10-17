@@ -50,6 +50,7 @@ class TickSummary:
     etches_updated: int = 0
     contested: int = 0
     claims_dropped: int = 0          # subjects declared `ignore: true` in ext/
+    claims_ungrounded: int = 0       # identifier subjects the signal never names
     subject_retries: int = 0         # signals re-read after a compound entity_name
     relations_resolved: int = 0      # claim values resolved to an entity (edges)
     # How subjects were identified this tick — see entities.ResolutionStats.
@@ -220,6 +221,12 @@ class Pipeline:
 
             claims = self._repair_compound_subjects(rep, result.claims, summary)
             for ec in claims:
+                if not self._registry.grounded(ec.entity_type, ec.entity_name, rep.content):
+                    # Subject came from the known-entities hint, not the signal.
+                    log.info("dropping ungrounded claim %s · %s (signal %s)",
+                             ec.entity_name, ec.property, rep.id[:12])
+                    summary.claims_ungrounded += 1
+                    continue
                 subjects = self._subjects_for(ec, rep.scope)
                 if not subjects:
                     # Ignored subject type, or a name we could not attach a fact

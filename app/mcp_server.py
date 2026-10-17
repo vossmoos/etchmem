@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 mcp = FastMCP(
     "etchmem",
@@ -37,6 +38,10 @@ mcp = FastMCP(
     stateless_http=True,
     json_response=True,
     streamable_http_path="/",       # final path is where main.py mounts it: /mcp
+    # The SDK's DNS-rebinding check only admits Host: localhost, which rejects
+    # in-cluster clients calling the service name (421). etchmem is not exposed
+    # to browsers, so the check is off.
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 
 

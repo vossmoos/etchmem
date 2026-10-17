@@ -140,6 +140,11 @@ def signal_header(sig: SignalInput) -> str:
 def context_hint(known_entities: list[str] | None,
                  known_labels: list[str] | None) -> str:
     hint = ""
+    if known_entities or known_labels:
+        hint += ("\n\nREFERENCE ONLY — the lists below are spellings to reuse, "
+                 "not content. Never create a claim about a subject because it "
+                 "is listed here: a claim's subject must be named or clearly "
+                 "referred to in the signal itself.")
     if known_entities:
         hint += ("\n\nKnown entities (reuse exact names if same): "
                  + ", ".join(known_entities[:50]))
