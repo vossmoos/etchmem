@@ -17,7 +17,7 @@ class RememberRequest(BaseModel):
         description="'immediate' = extract on the next worker tick (urgent); "
                     "'deferred' = batch and extract later (cheap default).",
     )
-    occurred_at: str | None = Field(
+    occurred_at: str | float | None = Field(
         None,
         description="When the fact actually happened — ISO-8601 (e.g. "
                     "'2014-03-17' or '2014-03-17T09:20:00Z') or epoch seconds. "

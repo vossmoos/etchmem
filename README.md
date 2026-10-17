@@ -523,7 +523,7 @@ included). Disable the UI with `ETCHMEM_UI_ENABLED=false`.
 ## MCP interface
 
 The same operations are exposed as **MCP tools** — `remember`, `recall`,
-`know`, `etches`, `associate`, `sleep`, `export`, `stats`, `etch_history` — over streamable HTTP at
+`know`, `etches`, `associate`, `sleep`, `export`, `stats`, `etch_history`, `dossier` — over streamable HTTP at
 `http://localhost:8000/mcp` (stateless, JSON responses). One process serves
 both protocols, so Claude Code / Claude Desktop / any MCP client can use
 etchmem as a memory backend directly:

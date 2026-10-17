@@ -242,3 +242,20 @@ def test_all_retracted_belief_sinks_in_recall(svc):
     acme = next(x for x in svc.know("Acme").etches if x.property == "plan")
     assert acme.current_value == "gold tier" and acme.version == 2
     assert "retracted" in acme.narrative
+
+
+def test_remember_accepts_epoch_seconds_over_http(tmp_path, monkeypatch):
+    """The SDK sends occurred_at as a float; the API must accept it, not only ISO strings."""
+    from fastapi.testclient import TestClient
+    import app.main as main
+    monkeypatch.setattr(S, "data_dir", str(tmp_path / "data"))
+    monkeypatch.setattr(S, "worker_enabled", False)
+    monkeypatch.setattr(main, "MemoryService",
+                        lambda: MemoryService(embedder=FakeEmbedding(), extractor=Recording(),
+                                              resolver=Res()))
+    with TestClient(main.app) as client:
+        for value in (1_792_000_000.5, "1792000000", "2026-10-16T14:05:00Z"):
+            r = client.post("/remember", json={"data": f"x {value}", "source": "s",
+                                               "scope": "t", "occurred_at": value})
+            assert r.status_code == 202, r.text
+            assert r.json()["occurred_at_declared"] is True

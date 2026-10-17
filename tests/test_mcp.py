@@ -20,7 +20,7 @@ from app.embeddings import FakeEmbedding               # noqa: E402
 from app.service import MemoryService                  # noqa: E402
 
 EXPECTED_TOOLS = {"remember", "recall", "know", "etches", "sleep", "export", "stats",
-                  "etch_history"}
+                  "etch_history", "dossier", "associate"}
 
 
 class StubExtractor(ClaimExtractor):
@@ -76,6 +76,14 @@ def test_tools_share_service_with_rest():
     etch_id = next(h["id"] for h in hits if h["origin"] == "etch")
     hist = mcp_server.etch_history(etch_id)
     assert [v["version"] for v in hist["versions"]] == [1]
+
+    dos = mcp_server.dossier(etch_id)
+    assert dos["etch"]["id"] == etch_id and dos["claims"] and dos["signals"]
+    assert "error" in mcp_server.dossier("nope::nothing")
+
+    out = mcp_server.remember(data="epoch as a number", source="agent-1", scope="sales",
+                              occurred_at=1_792_000_000.0)
+    assert out["occurred_at_declared"] is True
 
     exp = mcp_server.export()
     assert exp["count"] == 1 and os.path.isdir(exp["export_dir"])

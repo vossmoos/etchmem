@@ -15,6 +15,7 @@ Tools:
   export        — dump all etches to JSON files
   stats         — queue depths + counts
   etch_history  — version timeline of one etch
+  dossier       — full provenance of one etch: versions, claims, raw signals
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ mcp = FastMCP(
         "(one subject, exhaustive) or `etches` (filtered by scope, property and "
         "entity type, exhaustive). Use `sleep` to force "
         "a consolidation tick, `stats` for queue depths, `etch_history` for "
-        "the version timeline of one belief."
+        "the version timeline of one belief, `dossier` for why the system believes it."
     ),
     stateless_http=True,
     json_response=True,
@@ -52,7 +53,7 @@ def remember(
     scope: str,
     extract_mode: Literal["immediate", "deferred"] = "deferred",
     metadata: dict[str, Any] | None = None,
-    occurred_at: str | None = None,
+    occurred_at: str | float | None = None,
 ) -> dict[str, Any]:
     """Deposit a raw signal (call note, tool output, email, decision...).
     `source` = who produced it (e.g. 'agent-33'); `scope` = domain tag
@@ -185,3 +186,15 @@ def etch_history(etch_id: str) -> dict[str, Any]:
     """Version timeline of one etch (id format: '<entity_id>::<property>') —
     every belief change with narrative, confidence and triggering claims."""
     return {"etch_id": etch_id, "versions": _svc().history(etch_id)}
+
+
+@mcp.tool()
+def dossier(etch_id: str) -> dict[str, Any]:
+    """Why the system believes something: the etch, its version timeline, the
+    claims that formed it (values, polarity, corroboration, sources) and the raw
+    signals behind them. Raw signals are withheld when claims anonymization is on
+    (`signals_omitted`). Id format: '<entity_id>::<property>'."""
+    d = _svc().dossier(etch_id)
+    if d is None:
+        return {"error": f"unknown etch {etch_id!r}"}
+    return d.model_dump()
