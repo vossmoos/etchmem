@@ -86,7 +86,8 @@ hard cases:
    into typed claims, resolving/creating the canonical entity.
 3. **Routing gate (no LLM).** For each `(entity, property)` the gate inspects
    the claims and decides: **AGREE** (one value), **POLICY** (recency /
-   source-trust / multi-value cardinality resolves it), or **CONTESTED**.
+   source-trust / multi-value cardinality / retraction resolves it), or
+   **CONTESTED**. See [How beliefs change over time](#how-beliefs-change-over-time).
 4. **Stage 3 — conflict resolution (top model).** Only CONTESTED folds reach
    `etch_agent`, which resolves the disagreement and writes the narrative.
    When a conflict can't be settled, the belief is marked *contested* — your
@@ -315,6 +316,76 @@ subject; it is a prompt problem, not a data problem.
 spanning the whole period, then check that `claims.event_time` actually spans it
 rather than clustering on load day. If it clusters, nothing downstream is
 trustworthy and no amount of later tuning fixes it.
+
+## How beliefs change over time
+
+Facts get withdrawn, states move on, and people of different standing
+contradict each other. Three deterministic rules in the gate handle that, each
+with a recommended default and an env var to tune or switch it off.
+
+**Retraction: deprioritised, not deleted.** A value whose newest negation
+("we no longer need CSV export") is newer than its newest assertion is
+*retracted*. It is kept, with its weight multiplied by
+`ETCHMEM_RETRACTION_WEIGHT` (default `0.1`, one order of magnitude lower):
+
+- `current_value` lists only the values still in force;
+- `values` lists every value ever asserted, heaviest first:
+  `{"value", "weight", "active", "last_asserted_at", "retracted_at"}`, so the
+  memory knows both that a value is no longer valid and that it once was;
+- when every value of a belief is retracted, the belief keeps its last value
+  with confidence × 0.1, its narrative says so, and recall ranks it × 0.1:
+  still findable, no longer competing with what is true;
+- asserting the value again after the retraction reactivates it.
+
+```json
+"current_value": "parquet export",
+"values": [
+  {"value": "parquet export", "weight": 0.91, "active": true,
+   "last_asserted_at": 1788566400.0, "retracted_at": null},
+  {"value": "csv export", "weight": 0.09, "active": false,
+   "last_asserted_at": 1788480000.0, "retracted_at": 1790035200.0}]
+```
+
+**Agreement half-life: history is not disagreement.** A belief that moved
+`proposed → agreed → dropped` has three values in its history. Counting them
+equally made the latest one look like a 1-in-3 minority. Now each claim weighs
+`0.5 ** (age_days / ETCHMEM_AGREEMENT_HALF_LIFE_DAYS)` (default `14`, one
+sprint), with age measured back from the newest claim in the fold, not from
+"now", so a belief nobody touches does not erode. `0` restores equal weights.
+
+**Comparable trust: who may overrule whom.** A newer value used to win on
+recency alone, so a casual remark on Thursday overrode Monday's decision by
+someone with more authority. Now the newer value wins only if its source is
+at least as trusted, or *comparably* trusted, as the strongest older value's.
+Trust is compared as odds, `t / (1 − t)`, the scale on which people judge
+probabilities roughly linearly; the odds ratio may not exceed
+`ETCHMEM_TRUST_SAME_ODDS_RATIO` (default `3`, the conventional line below which
+evidence is "barely worth mentioning", Jeffreys 1961; Kass & Raftery 1995).
+Beyond it the belief is **contested** and goes to conflict resolution, with
+policy `trust_dispute`. A very large value restores pure recency.
+
+| newer source | older source | odds ratio | outcome |
+|---|---|---|---|
+| 0.70 | 0.85 | 2.4 | newer wins (recency) |
+| 0.60 | 0.85 | 3.8 | contested |
+| 0.85 | 0.95 | 3.4 | contested |
+| 0.95 | 0.50 | — | newer wins (more trusted) |
+
+### What the extractor sees
+
+Each signal reaches the extractor with a header,
+`[sent 2026-10-16 (Fri) 14:05 UTC · source slack]`, built from `occurred_at`
+(else ingest time) and `source`. Relative dates in the text ("by Friday",
+"yesterday") are resolved against it into absolute ISO dates. With it, per
+scope, come the names of recently active subjects
+(`ETCHMEM_EXTRACT_KNOWN_ENTITIES`, default 50) and the labels already held for
+multi-value and `detail: true` properties (`ETCHMEM_EXTRACT_KNOWN_LABELS`,
+default 10 per belief, retracted ones included). The extractor reuses them, so
+the same fact keeps one label (corroboration) and "we dropped X" negates
+exactly the X that was asserted (retraction). `0` turns either hint off.
+
+Existing beliefs pick up these rules the next time their `(entity, property)`
+is folded.
 
 ## Relations: when the value is another entity
 
@@ -552,6 +623,10 @@ Via environment / `.env` (see `.env.example`). Highlights:
 - `ETCHMEM_EXT_DIR` — folder of claim-extension YAML files (see above).
 - `ETCHMEM_SOURCE_TRUST_JSON` / `ETCHMEM_TRUST_GAP` — trust-based conflict
   resolution: rank your sources, let policy settle disagreements.
+- `ETCHMEM_RETRACTION_WEIGHT` (0.1), `ETCHMEM_AGREEMENT_HALF_LIFE_DAYS` (14),
+  `ETCHMEM_TRUST_SAME_ODDS_RATIO` (3) — how beliefs change over time (see above).
+- `ETCHMEM_EXTRACT_KNOWN_ENTITIES` (50), `ETCHMEM_EXTRACT_KNOWN_LABELS` (10) —
+  names and labels the extractor is asked to reuse.
 - `ETCHMEM_CLAIMS_ANONYMIZATION` — anonymize personal data in claims/etches
   (see above). Default `false`.
 - `ETCHMEM_WORKER_ENABLED`, `ETCHMEM_WORKER_INTERVAL_SECONDS`,
@@ -592,7 +667,9 @@ pytest -q       # fully offline; no API key needed
 
 Covered: entity-boundary (no contamination), corroboration raising confidence,
 recency supersession + versioning, genuine conflict → contested (LLM invoked),
-time-travel recall, claims anonymization, and the MCP interface.
+time-travel recall, claims anonymization, the MCP interface, and retraction,
+agreement half-life, comparable trust and extraction context
+(`tests/test_reconsolidation.py`).
 
 ## Production deployments
 
@@ -649,8 +726,8 @@ does not quietly sit at the default. Renaming a source in the depositor resets i
 
 ### Evidence in the API
 
-`recall`, `know`, `export`, the dossier and `/history` return an `evidence` block next
-to `confidence`, with the trust that was declared when the belief was folded:
+`recall`, `know`, `etches`, `export`, the dossier and `/history` return an `evidence`
+block (and the per-value `values` list) next to `confidence`, with the trust that was declared when the belief was folded:
 
 ```json
 {"confidence": 0.9,

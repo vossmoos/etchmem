@@ -125,6 +125,11 @@ class Etch:
     # What the confidence rests on: {"signals", "sources": [{source, trust,
     # signals}], "max_trust"}. Computed at fold time with the trust declared then.
     evidence: dict = field(default_factory=dict)
+    # One entry per value ever asserted for this (entity, property), heaviest
+    # first: [{"value", "weight", "active", "last_asserted_at", "retracted_at"}].
+    # A retracted value is not deleted: it stays here with a low weight, so the
+    # memory knows both that it is no longer valid and that it once was.
+    values: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -151,7 +156,7 @@ _CLAIM_COLS = """id, entity_id, entity_name, property, value, value_norm,
 _ETCH_COLS = """id, entity_id, entity_name, property, current_value, status,
                 confidence, narrative, version, scope, source, claim_ids,
                 source_ids, created_at, updated_at, embedding, value_entity_id,
-                details, evidence"""
+                details, evidence, value_weights"""
 
 
 # ── Left store ───────────────────────────────────────────────────────────────
@@ -475,7 +480,8 @@ class RightStore:
                     embedding    FLOAT[{self._dim}],
                     value_entity_id VARCHAR,
                     details      VARCHAR,
-                    evidence     VARCHAR
+                    evidence     VARCHAR,
+                    value_weights VARCHAR
                 );
                 CREATE TABLE IF NOT EXISTS etch_versions (
                     etch_id      VARCHAR,
@@ -489,6 +495,7 @@ class RightStore:
                     created_at   DOUBLE,
                     details      VARCHAR,
                     evidence     VARCHAR,
+                    value_weights VARCHAR,
                     PRIMARY KEY (etch_id, version)
                 );
                 CREATE TABLE IF NOT EXISTS anon_tokens (
@@ -512,12 +519,16 @@ class RightStore:
             self._con.execute("ALTER TABLE etches ADD COLUMN details VARCHAR")
         if "evidence" not in cols:
             self._con.execute("ALTER TABLE etches ADD COLUMN evidence VARCHAR")
+        if "value_weights" not in cols:
+            self._con.execute("ALTER TABLE etches ADD COLUMN value_weights VARCHAR")
         vcols = {r[1] for r in
                  self._con.execute("PRAGMA table_info('etch_versions')").fetchall()}
         if "details" not in vcols:
             self._con.execute("ALTER TABLE etch_versions ADD COLUMN details VARCHAR")
         if "evidence" not in vcols:
             self._con.execute("ALTER TABLE etch_versions ADD COLUMN evidence VARCHAR")
+        if "value_weights" not in vcols:
+            self._con.execute("ALTER TABLE etch_versions ADD COLUMN value_weights VARCHAR")
         if "event_at" not in vcols:
             # Older rows only know when we learned it. Seeding event_at from
             # created_at makes event-basis time travel degrade to ingest-basis
@@ -555,6 +566,43 @@ class RightStore:
             if alias_norm in set(_u(r[3], [])):
                 return self._row_to_entity(r)
         return None
+
+    def recent_context(self, scope: str | None, *, entities: int = 50,
+                       label_properties: set[str] | None = None,
+                       labels_per_belief: int = 10, beliefs: int = 30,
+                       ) -> tuple[list[str], list[str]]:
+        """What the extractor should reuse: recently active subject names, and
+        the labels already held for label-like properties, in one scope.
+
+        Returns (entity_names, label_lines) where each label line reads
+        "subject · property: label, label". Labels include retracted ones, so
+        "we dropped X" can name exactly the X that was asserted.
+        """
+        where, params = ("WHERE e.scope = ?", [scope]) if scope else ("", [])
+        names: list[str] = []
+        lines: list[str] = []
+        with self._lock:
+            if entities > 0:
+                names = [r[0] for r in self._con.execute(
+                    f"""SELECT n.name, max(e.updated_at) AS m FROM etches e
+                        JOIN entities n ON n.id = e.entity_id {where}
+                        GROUP BY n.name ORDER BY m DESC LIMIT ?""",
+                    [*params, entities]).fetchall()]
+            props = sorted(label_properties or ())
+            if props and labels_per_belief > 0:
+                clause = (f"{where} AND" if where else "WHERE") + \
+                    f" e.property IN ({', '.join('?' * len(props))})"
+                rows = self._con.execute(
+                    f"""SELECT e.entity_name, e.property, e.current_value, e.value_weights
+                        FROM etches e {clause} ORDER BY e.updated_at DESC LIMIT ?""",
+                    [*params, *props, beliefs]).fetchall()
+                for ent, prop, current, weights in rows:
+                    labels = [v["value"] for v in _u(weights, [])] or \
+                        [x.strip() for x in (current or "").split(",") if x.strip()]
+                    if labels:
+                        lines.append(f"{ent} · {prop}: "
+                                     + ", ".join(labels[:labels_per_belief]))
+        return names, lines
 
     def search_entities(self, qvec, top_k=5) -> list[tuple[Entity, float]]:
         with self._lock:
@@ -615,17 +663,19 @@ class RightStore:
                 f"""INSERT INTO etches (id, entity_id, entity_name, property,
                     current_value, status, confidence, narrative, version, scope,
                     source, claim_ids, source_ids, created_at, updated_at, embedding,
-                    value_entity_id, details, evidence)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::FLOAT[{self._dim}],?,?,?)""",
+                    value_entity_id, details, evidence, value_weights)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::FLOAT[{self._dim}],?,?,?,?)""",
                 [e.id, e.entity_id, e.entity_name, e.property, e.current_value, e.status,
                  e.confidence, e.narrative, e.version, e.scope, e.source,
                  _j(e.claim_ids), _j(e.source_ids), e.created_at, e.updated_at,
-                 e.embedding, e.value_entity_id, _j(e.details), _j(e.evidence)])
+                 e.embedding, e.value_entity_id, _j(e.details), _j(e.evidence),
+                 _j(e.values)])
 
     def add_version(self, etch_id, version, value, status, confidence, narrative,
                     triggered_by, created_at, event_at: float | None = None,
                     details: list[dict] | None = None,
-                    evidence: dict | None = None) -> None:
+                    evidence: dict | None = None,
+                    values: list[dict] | None = None) -> None:
         """Snapshot one belief change.
 
         `created_at` is when we learned it; `event_at` is when the newest fact
@@ -639,23 +689,25 @@ class RightStore:
             self._con.execute(
                 """INSERT INTO etch_versions (etch_id, version, current_value, status,
                     confidence, narrative, triggered_by, created_at, event_at, details,
-                    evidence)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    evidence, value_weights)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [etch_id, version, value, status, confidence, narrative,
                  _j(triggered_by), created_at, event_at or created_at,
-                 _j(details or []), _j(evidence or {})])
+                 _j(details or []), _j(evidence or {}), _j(values or [])])
 
     def versions(self, etch_id: str) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._con.execute(
                 """SELECT version, current_value, status, confidence, narrative,
-                          triggered_by, created_at, event_at, details, evidence
+                          triggered_by, created_at, event_at, details, evidence,
+                          value_weights
                    FROM etch_versions WHERE etch_id = ? ORDER BY version""",
                 [etch_id]).fetchall()
         return [{"version": r[0], "current_value": r[1], "status": r[2],
                  "confidence": r[3], "narrative": r[4], "triggered_by": _u(r[5], []),
                  "created_at": r[6], "event_at": r[7], "details": _u(r[8], []),
-                 "evidence": _u(r[9], {})} for r in rows]
+                 "evidence": _u(r[9], {}),
+                "values": _u(r[10], [])} for r in rows]
 
     def version_as_of(self, etch_id: str, as_of: float,
                       basis: str = "ingest") -> dict[str, Any] | None:
@@ -673,7 +725,8 @@ class RightStore:
         with self._lock:
             r = self._con.execute(
                 f"""SELECT version, current_value, status, confidence, narrative,
-                           triggered_by, created_at, event_at, details, evidence
+                           triggered_by, created_at, event_at, details, evidence,
+                           value_weights
                     FROM etch_versions WHERE etch_id = ? AND {column} <= ?
                     ORDER BY {column} DESC, version DESC LIMIT 1""",
                 [etch_id, as_of]).fetchone()
@@ -682,7 +735,8 @@ class RightStore:
         return {"version": r[0], "current_value": r[1], "status": r[2],
                 "confidence": r[3], "narrative": r[4], "triggered_by": _u(r[5], []),
                 "created_at": r[6], "event_at": r[7], "details": _u(r[8], []),
-                "evidence": _u(r[9], {})}
+                "evidence": _u(r[9], {}),
+                "values": _u(r[10], [])}
 
     def search_etches(self, qvec, top_k, scope=None) -> list[Hit]:
         clauses, params = ["embedding IS NOT NULL"], []
@@ -693,18 +747,19 @@ class RightStore:
             rows = self._con.execute(
                 f"""SELECT id, entity_id, entity_name, property, current_value, status,
                            confidence, narrative, version, scope, source, created_at,
-                           updated_at, details, evidence,
+                           updated_at, details, evidence, value_weights,
                            array_cosine_similarity(embedding, ?::FLOAT[{self._dim}]) AS sim
                     FROM etches WHERE {where} ORDER BY sim DESC LIMIT ?""",
                 [qvec, *params, top_k]).fetchall()
         out = []
         for r in rows:
-            out.append(Hit(r[0], r[7], float(r[15]), {
+            out.append(Hit(r[0], r[7], float(r[16]), {
                 "entity_id": r[1], "entity_name": r[2], "property": r[3],
                 "current_value": r[4], "status": r[5], "confidence": r[6],
                 "version": r[8], "scope": r[9], "source": r[10],
                 "created_at": r[11], "updated_at": r[12],
-                "details": _u(r[13], []), "evidence": _u(r[14], {})}))
+                "details": _u(r[13], []), "evidence": _u(r[14], {}),
+                "values": _u(r[15], [])}))
         return out
 
     def etches_for_entity(self, entity_id: str) -> list[Etch]:
@@ -794,7 +849,7 @@ class RightStore:
                     source_ids=_u(r[12], []), created_at=r[13], updated_at=r[14],
                     embedding=list(r[15]) if r[15] is not None else None,
                     value_entity_id=r[16], details=_u(r[17], []),
-                    evidence=_u(r[18], {}))
+                    evidence=_u(r[18], {}), values=_u(r[19], []))
 
 
 # ── Container ────────────────────────────────────────────────────────────────

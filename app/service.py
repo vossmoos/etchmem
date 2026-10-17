@@ -122,6 +122,7 @@ class MemoryService:
                 h.row["confidence"], h.row["version"])
             details = h.row.get("details") or []
             evidence = h.row.get("evidence") or None
+            values = h.row.get("values") or []
             updated_at = h.row.get("updated_at")
             if as_of_ts is not None:
                 snap = self.stores.right.version_as_of(h.id, as_of_ts, as_of_basis)
@@ -132,14 +133,19 @@ class MemoryService:
                 value = snap["current_value"]
                 details = snap.get("details") or []
                 evidence = snap.get("evidence") or None
+                values = snap.get("values") or []
                 updated_at = snap["created_at"]
+            score = h.similarity
+            if values and not any(v.get("active", True) for v in values):
+                # Retracted beliefs stay findable, at much lower priority.
+                score *= min(max(settings.retraction_weight, 0.0), 1.0)
             results[h.id] = RecallResult(
-                id=h.id, content=content, score=h.similarity, origin="etch",
+                id=h.id, content=content, score=score, origin="etch",
                 entity_id=h.row.get("entity_id"),
                 entity_name=h.row.get("entity_name"), property=h.row.get("property"),
                 value=value, status=status, confidence=confidence, version=version,
                 scope=h.row.get("scope"), source=h.row.get("source"),
-                details=details, evidence=evidence,
+                details=details, evidence=evidence, values=values,
                 created_at=h.row.get("created_at", 0.0), updated_at=updated_at)
 
         if include_signals and as_of_ts is None:
@@ -170,7 +176,7 @@ class MemoryService:
                 current_value=e.current_value, status=e.status, confidence=e.confidence,
                 narrative=e.narrative, version=e.version, scope=e.scope, source=e.source,
                 value_entity_id=e.value_entity_id, details=e.details,
-                evidence=e.evidence or None,
+                evidence=e.evidence or None, values=e.values,
                 claim_ids=e.claim_ids, source_ids=e.source_ids,
                 created_at=e.created_at, updated_at=e.updated_at)
             with open(os.path.join(export_dir, f"{e.id.replace('::', '__')}.json"),
@@ -204,7 +210,7 @@ class MemoryService:
             current_value=e.current_value, status=e.status, confidence=e.confidence,
             narrative=e.narrative, version=e.version, scope=e.scope, source=e.source,
             value_entity_id=e.value_entity_id, details=e.details,
-            evidence=e.evidence or None,
+            evidence=e.evidence or None, values=e.values,
             claim_ids=e.claim_ids, source_ids=e.source_ids,
             created_at=e.created_at, updated_at=e.updated_at) for e, etype in rows]
         return EtchListResponse(etches=out, count=len(out), total=total,
@@ -233,6 +239,7 @@ class MemoryService:
                 e.current_value, e.status, e.confidence, e.version)
             narrative, updated_at, details = e.narrative, e.updated_at, e.details
             evidence = e.evidence or None
+            values = e.values
             if as_of_ts is not None:
                 snap = self.stores.right.version_as_of(e.id, as_of_ts, as_of_basis)
                 if snap is None:
@@ -242,6 +249,7 @@ class MemoryService:
                 narrative, updated_at = snap["narrative"], snap["created_at"]
                 details = snap.get("details") or []
                 evidence = snap.get("evidence") or None
+                values = snap.get("values") or []
             if status == "contested":
                 contested += 1
             out.append(EtchOut(
@@ -249,7 +257,7 @@ class MemoryService:
                 current_value=value, status=status, confidence=confidence,
                 narrative=narrative, version=version, scope=e.scope,
                 source=e.source, value_entity_id=e.value_entity_id, details=details,
-                evidence=evidence,
+                evidence=evidence, values=values,
                 claim_ids=e.claim_ids, source_ids=e.source_ids,
                 created_at=e.created_at, updated_at=updated_at))
         return KnowledgeResponse(
@@ -380,7 +388,7 @@ class MemoryService:
             current_value=e.current_value, status=e.status, confidence=e.confidence,
             narrative=e.narrative, version=e.version, scope=e.scope, source=e.source,
             value_entity_id=e.value_entity_id, details=e.details,
-            evidence=e.evidence or None,
+            evidence=e.evidence or None, values=e.values,
             claim_ids=e.claim_ids, source_ids=e.source_ids,
             created_at=e.created_at, updated_at=e.updated_at)
         versions = [VersionOut(**v) for v in self.stores.right.versions(etch_id)]

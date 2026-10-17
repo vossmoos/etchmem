@@ -1,4 +1,4 @@
-"""
+r"""
 Declarative claim/etch extensions.
 
 Drop YAML files into the ext dir (default ./ext) to teach the claim extractor

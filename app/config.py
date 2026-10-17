@@ -74,6 +74,32 @@ class Settings(BaseSettings):
     # one: repetition helps, but never like an independent witness.
     evidence_repeat_decay: float = 0.5
 
+    # ── Reconsolidation: how beliefs change over time ──────────────────────
+    # A value whose newest negation ("we dropped X") is newer than its newest
+    # assertion is RETRACTED: it is kept, but its weight is multiplied by this.
+    # 0.1 = one order of magnitude lower priority. 1.0 = retractions ignored.
+    retraction_weight: float = 0.1
+    # Older claims count less when the gate measures agreement: a claim's weight
+    # halves every N days, measured back from the newest claim in the fold (not
+    # from "now", so a belief does not drift while nothing happens). 14 = one
+    # typical sprint. 0 = every claim counts equally, whatever its age.
+    agreement_half_life_days: float = 14.0
+    # When a newer value disagrees with an older one, the newer one wins on
+    # recency only if its source is "about as trusted" as the older one's. Trust
+    # is compared as odds (t / (1 - t)); a ratio above this means "not the same"
+    # and the belief goes to conflict resolution instead. 3 is the conventional
+    # line below which evidence is "barely worth mentioning" (Jeffreys 1961;
+    # Kass & Raftery 1995). A very large value restores pure recency.
+    trust_same_odds_ratio: float = 3.0
+
+    # ── Extraction context ─────────────────────────────────────────────────
+    # The extractor is told when each signal was sent and by which source, so
+    # "by Friday" or "yesterday" become real dates. It is also given the names
+    # of recently active entities and existing labels in the same scope, so it
+    # reuses them instead of inventing near-duplicates. 0 disables the hint.
+    extract_known_entities: int = 50
+    extract_known_labels: int = 10             # labels per (subject, property)
+
     # ── Event time ─────────────────────────────────────────────────────────
     # Which wins when a signal declares `occurred_at` AND the extractor reads a
     # date out of the text:
@@ -158,6 +184,11 @@ _ENV_ALIASES = {
     "trust_gap": "ETCHMEM_TRUST_GAP",
     "default_source_trust": "ETCHMEM_DEFAULT_SOURCE_TRUST",
     "evidence_repeat_decay": "ETCHMEM_EVIDENCE_REPEAT_DECAY",
+    "retraction_weight": "ETCHMEM_RETRACTION_WEIGHT",
+    "agreement_half_life_days": "ETCHMEM_AGREEMENT_HALF_LIFE_DAYS",
+    "trust_same_odds_ratio": "ETCHMEM_TRUST_SAME_ODDS_RATIO",
+    "extract_known_entities": "ETCHMEM_EXTRACT_KNOWN_ENTITIES",
+    "extract_known_labels": "ETCHMEM_EXTRACT_KNOWN_LABELS",
     "subject_retry_enabled": "ETCHMEM_SUBJECT_RETRY_ENABLED",
     "claims_anonymization": "ETCHMEM_CLAIMS_ANONYMIZATION",
     "worker_enabled": "ETCHMEM_WORKER_ENABLED",

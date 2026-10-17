@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from app.agents import ClaimExtractor, ConflictResolver, ExtractionResult
+from app.agents import ClaimExtractor, ConflictResolver, ExtractionResult, SignalInput
 from app.anonymize import ANON_ENTITY_LABELS, scrub
 from app.config import settings
 from app.dedup import group_duplicates
@@ -173,11 +173,22 @@ class Pipeline:
         # Only the network calls run in threads; all DuckDB writes happen
         # sequentially below (single-writer constraint).
         size = max(1, settings.extract_llm_batch_size)
-        chunks = [representatives[i:i + size] for i in range(0, len(representatives), size)]
+        by_scope: dict[str, list] = {}
+        for s in representatives:
+            by_scope.setdefault(s.scope, []).append(s)
+        # One scope per prompt, so each chunk gets its own scope's context.
+        chunks = [group[i:i + size] for group in by_scope.values()
+                  for i in range(0, len(group), size)]
         chunk_results: list[list[ExtractionResult] | None] = [None] * len(chunks)
 
+        context = self._extraction_context(representatives)
+
         def _run_chunk(chunk):
-            return _with_retry(lambda: self._extractor.extract_batch([s.content for s in chunk]))
+            names, labels = context.get(chunk[0].scope, ([], []))
+            inputs = [SignalInput(text=s.content, sent_at=s.event_at, source=s.source)
+                      for s in chunk]
+            return _with_retry(lambda: self._extractor.extract_signals(
+                inputs, names or None, labels or None))
 
         if len(chunks) == 1:
             try:
@@ -223,6 +234,27 @@ class Pipeline:
             summary.extracted_signals += len(members)
 
         summary.entities = self._entities.stats.to_dict()
+
+    def _extraction_context(self, signals) -> dict[str, tuple[list[str], list[str]]]:
+        """Per scope: subject names and existing labels the extractor should reuse.
+
+        Without this every message invents its own spelling of a subject and
+        its own label for a fact, so corroboration and retraction never meet.
+        """
+        if settings.extract_known_entities <= 0 and settings.extract_known_labels <= 0:
+            return {}
+        label_props = set(settings.multi_value_set) | {
+            name for name, spec in self._registry.by_name.items() if spec.detail}
+        out = {}
+        for scope in {s.scope for s in signals}:
+            try:
+                out[scope] = self._s.right.recent_context(
+                    scope, entities=max(0, settings.extract_known_entities),
+                    label_properties=label_props,
+                    labels_per_belief=max(0, settings.extract_known_labels))
+            except Exception:
+                log.exception("could not build extraction context for scope %s", scope)
+        return out
 
     def _compound(self, ec) -> bool:
         """Does this claim name more than one subject? A count, not a judgement."""
@@ -371,12 +403,15 @@ class Pipeline:
                 narrative = f"{entity_name} — {prop.replace('_', ' ')}: {value}."
 
             evidence = decision.evidence
+            values = decision.values
             details = select_details(prop, claims, value)
             if details:
                 # The narrative is what recall embeds and returns, so it carries
                 # the wording, not just the labels.
                 narrative = (f"{entity_name} — {prop.replace('_', ' ')}: "
                              + "; ".join(f"{d['value']} — {d['detail']}" for d in details) + ".")
+            if decision.policy == "retracted":
+                narrative += " No longer valid: retracted."
 
             etch_id = f"{entity_id}::{prop}"
             existing = self._s.right.get_etch(etch_id)
@@ -385,7 +420,8 @@ class Pipeline:
             if existing is None:
                 version, created_at, changed = 1, now, True
             elif (existing.current_value != value or existing.status != status
-                  or existing.details != details):
+                  or existing.details != details
+                  or (existing.values and _active(existing.values) != _active(values))):
                 version, created_at, changed = existing.version + 1, existing.created_at, True
             else:
                 version, created_at, changed = existing.version, existing.created_at, False
@@ -405,7 +441,7 @@ class Pipeline:
                 created_at=created_at, updated_at=now,
                 embedding=self._embed.embed_one(narrative),
                 value_entity_id=value_entity_id, details=details,
-                evidence=evidence,
+                evidence=evidence, values=values,
             )
             self._s.right.upsert_etch(etch)
 
@@ -416,13 +452,18 @@ class Pipeline:
                 event_at = max((c.event_time for c in claims if c.event_time), default=now)
                 self._s.right.add_version(etch_id, version, value, status, confidence,
                                           narrative, new_claim_ids, now, event_at, details,
-                                          evidence)
+                                          evidence, values)
                 if existing is None:
                     summary.etches_formed += 1
                 else:
                     summary.etches_updated += 1
 
             self._s.left.set_claims_status([c.id for c in claims], C_CONSOLIDATED)
+
+
+def _active(values: list[dict]) -> set[tuple[str, bool]]:
+    """Which values are in force — what a new version must be written for."""
+    return {(v.get("value", ""), bool(v.get("active", True))) for v in values}
 
 
 # ── Background loop ──────────────────────────────────────────────────────────

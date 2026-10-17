@@ -12,6 +12,8 @@ Model strings come from settings and are swapped with one env var each.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
@@ -67,6 +69,12 @@ A claim is one atomic fact: (entity, property, value). Rules:
   machine Y"), decide which one the fact is about and name only that one.
 - Do NOT invent facts. Do NOT merge different entities.
 - If known entities are provided, reuse the exact name when it's the same one.
+- If known labels are provided, reuse the exact label when a signal states the
+  same fact again or retracts it ("we dropped X" negates the label X exactly).
+- A signal may start with a header line `[sent <date> · source <name>]`. It is
+  metadata, not content: never extract claims from it. Resolve relative dates in
+  the text ("Friday", "yesterday", "in two weeks") against the sent date, and
+  write every date value and `event_time` as an absolute ISO-8601 date.
 """
 
 
@@ -111,6 +119,36 @@ an empty claims list (or may be omitted).
 """
 
 
+@dataclass(frozen=True)
+class SignalInput:
+    """One signal as the extractor sees it: the text plus when and from where."""
+    text: str
+    sent_at: float = 0.0            # occurred_at, else ingest time (epoch seconds)
+    source: str = ""
+
+
+def signal_header(sig: SignalInput) -> str:
+    """`[sent 2026-10-16 (Fri) 14:05 UTC · source slack]` — or '' without a time."""
+    if not sig.sent_at:
+        return ""
+    t = datetime.fromtimestamp(sig.sent_at, tz=timezone.utc)
+    when = t.strftime("%Y-%m-%d (%a)") + ("" if (t.hour, t.minute) == (0, 0)
+                                          else t.strftime(" %H:%M UTC"))
+    return f"[sent {when}" + (f" · source {sig.source}" if sig.source else "") + "]\n"
+
+
+def context_hint(known_entities: list[str] | None,
+                 known_labels: list[str] | None) -> str:
+    hint = ""
+    if known_entities:
+        hint += ("\n\nKnown entities (reuse exact names if same): "
+                 + ", ".join(known_entities[:50]))
+    if known_labels:
+        hint += ("\n\nKnown labels (reuse the exact label for the same fact):\n"
+                 + "\n".join(f"- {line}" for line in known_labels))
+    return hint
+
+
 class ClaimExtractor(ABC):
     @abstractmethod
     def extract(self, signal_text: str, known_entities: list[str] | None = None) -> ExtractionResult: ...
@@ -120,6 +158,18 @@ class ClaimExtractor(ABC):
     ) -> list[ExtractionResult]:
         """Extract claims for several signals. Default: sequential fallback."""
         return [self.extract(t, known_entities) for t in signal_texts]
+
+    def extract_signals(
+        self, signals: list[SignalInput], known_entities: list[str] | None = None,
+        known_labels: list[str] | None = None,
+    ) -> list[ExtractionResult]:
+        """What the pipeline calls: signals with their send time and source.
+
+        Default: plain texts through `extract_batch`, so stubs and simple
+        backends need no changes. Model-backed extractors override this to show
+        the header and the known labels to the model.
+        """
+        return self.extract_batch([s.text for s in signals], known_entities)
 
     def re_extract_subjects(
         self, signal_text: str, compound_names: list[str],
@@ -165,10 +215,9 @@ class PydanticAIClaimExtractor(ClaimExtractor):
                           + _CLAIM_BATCH_SUFFIX + anon,
         )
 
-    def extract(self, signal_text: str, known_entities: list[str] | None = None) -> ExtractionResult:
-        hint = ""
-        if known_entities:
-            hint = "\n\nKnown entities (reuse exact names if same): " + ", ".join(known_entities[:50])
+    def extract(self, signal_text: str, known_entities: list[str] | None = None,
+                known_labels: list[str] | None = None) -> ExtractionResult:
+        hint = context_hint(known_entities, known_labels)
         result = self._agent.run_sync(f"## Signal\n\n{signal_text}{hint}").output
         # Drop claims that violate a declared extension's enum / entity_types.
         # Unknown (core, open-vocabulary) properties always pass.
@@ -178,14 +227,20 @@ class PydanticAIClaimExtractor(ClaimExtractor):
         ]
         return ExtractionResult(claims=kept)
 
+    def extract_signals(
+        self, signals: list[SignalInput], known_entities: list[str] | None = None,
+        known_labels: list[str] | None = None,
+    ) -> list[ExtractionResult]:
+        texts = [signal_header(s) + s.text for s in signals]
+        return self.extract_batch(texts, known_entities, known_labels=known_labels)
+
     def extract_batch(
         self, signal_texts: list[str], known_entities: list[str] | None = None,
+        known_labels: list[str] | None = None,
     ) -> list[ExtractionResult]:
         if len(signal_texts) == 1:
-            return [self.extract(signal_texts[0], known_entities)]
-        hint = ""
-        if known_entities:
-            hint = "\n\nKnown entities (reuse exact names if same): " + ", ".join(known_entities[:50])
+            return [self.extract(signal_texts[0], known_entities, known_labels)]
+        hint = context_hint(known_entities, known_labels)
         prompt = "\n\n".join(
             f"### Signal {i}\n\n{text}" for i, text in enumerate(signal_texts)
         ) + hint

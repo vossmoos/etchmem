@@ -70,6 +70,16 @@ class DetailItem(BaseModel):
     detail: str
 
 
+class ValueWeight(BaseModel):
+    """One value ever asserted for a belief. A retracted value is kept, with
+    `active=False` and a much lower weight: no longer valid, but once it was."""
+    value: str
+    weight: float = 0.0                 # share of the belief's total weight, 0..1
+    active: bool = True
+    last_asserted_at: float | None = None
+    retracted_at: float | None = None
+
+
 class SourceEvidence(BaseModel):
     source: str
     trust: float                    # declared trust at fold time (0..1)
@@ -99,6 +109,7 @@ class RecallResult(BaseModel):
     source: str | None = None
     details: list[DetailItem] = Field(default_factory=list)
     evidence: EvidenceOut | None = None
+    values: list[ValueWeight] = Field(default_factory=list)
     created_at: float = 0.0
     updated_at: float | None = None
 
@@ -146,6 +157,7 @@ class EtchOut(BaseModel):
     value_entity_id: str | None = None
     details: list[DetailItem] = Field(default_factory=list)
     evidence: EvidenceOut | None = None
+    values: list[ValueWeight] = Field(default_factory=list)
     claim_ids: list[str] = Field(default_factory=list)
     source_ids: list[str] = Field(default_factory=list)
     created_at: float
@@ -260,6 +272,7 @@ class VersionOut(BaseModel):
     narrative: str
     details: list[DetailItem] = Field(default_factory=list)
     evidence: EvidenceOut | None = None
+    values: list[ValueWeight] = Field(default_factory=list)
     triggered_by: list[str] = Field(default_factory=list)
     created_at: float                  # when we learned it
     event_at: float = 0.0              # when the fact behind it became true
