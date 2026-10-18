@@ -71,6 +71,16 @@ A claim is one atomic fact: (entity, property, value). Rules:
 - If known entities are provided, reuse the exact name when it's the same one.
 - If known labels are provided, reuse the exact label when a signal states the
   same fact again or retracts it ("we dropped X" negates the label X exactly).
+- A signal may carry a line `[meaning in its conversation: ...]`: what the signal
+  says once its references to earlier messages ("that", "yes", "no, new task")
+  are spelled out. Treat it as the signal's content, and extract from it.
+  Agreeing to work ("let us implement that") makes it decision_state "agreed",
+  and every concrete thing it agrees should be done is a requirement of its own.
+- A signal (or meaning) that only asks a question states nothing: no claims.
+- A subject marked `[wrongly recorded]` had facts recorded on it that belong to
+  another subject. Emit exactly those facts negated for it, with the same labels,
+  and asserted for the right subject. Never state anything else about it: not its
+  decision_state, not its work_state.
 - A signal may end with a line `[subjects: ...]`: the subjects it was found to
   be about. Emit claims only about those subjects, using those exact names and
   types. `[subjects: none]` means the signal is about no subject: no claims.
@@ -134,6 +144,14 @@ class SignalInput:
     sent_at: float = 0.0            # occurred_at, else ingest time (epoch seconds)
     source: str = ""
     subjects: tuple[str, ...] | None = None
+    # What the signal means in its conversation, written by the resolve step when it
+    # refers to earlier messages ("let us implement that"). Extraction reads it next
+    # to the signal; the raw conversation itself never reaches extraction.
+    meaning: str = ""
+
+
+def meaning_footer(sig: SignalInput) -> str:
+    return f"\n[meaning in its conversation: {sig.meaning}]" if sig.meaning else ""
 
 
 def subjects_footer(sig: SignalInput) -> str:
@@ -173,6 +191,9 @@ class ResolvedSubject(BaseModel):
     reason: str = Field("", description="One short sentence: why this subject.")
     in_focus: bool = Field(False, description="True when this is a subject the "
                                               "conversation was already about.")
+    wrongly_recorded: bool = Field(
+        False, description="True when the signal corrects earlier facts that were "
+                           "recorded on this subject but do not belong to it.")
 
 
 class AssociatedSubject(BaseModel):
@@ -187,6 +208,10 @@ class SignalSubjects(BaseModel):
     signal_index: int
     subjects: list[ResolvedSubject] = Field(default_factory=list)
     associations: list[AssociatedSubject] = Field(default_factory=list)
+    meaning: str = Field(
+        "", description="Only when the signal refers to earlier messages: what it says "
+                        "with those references spelled out, as one self-contained "
+                        "statement in the author's terms. Empty when it stands on its own.")
 
 
 @dataclass
@@ -194,6 +219,7 @@ class Resolution:
     """The resolve step's answer for one signal."""
     subjects: list[ResolvedSubject] = field(default_factory=list)
     associations: list[AssociatedSubject] = field(default_factory=list)
+    meaning: str = ""
 
 
 class BatchResolution(BaseModel):
@@ -238,7 +264,16 @@ Each signal also comes with candidates: existing subjects, labelled [focus],
 [linked] (tied to a focus subject, e.g. the ticket that tracks it) or [similar].
 They are options, not content.
 - Choose a candidate only when the signal itself refers to it: by its name, its
-  key, or a description a reader would match to it, in any language or wording.
+  key, or a description a reader would match to that same item, in any language or
+  wording — or by a reference ("this ticket", "it") while the conversation is
+  about it.
+- A signal that names an existing item is about it: "a plan for followup-3",
+  "the link in followup-3" are about followup-3.
+- Same area is not the same item. A signal that does NOT name an existing item
+  and asks to add, build or change something that item does not already describe
+  is about NEW work, even when the item covers the same component: name the new
+  work by what it is (existing=false) and put the existing item in
+  `associations`.
 - Similarity alone is not a reference. A candidate the signal does not refer to
   is not a subject of the signal, however close it looks.
 - Words like "the link", "this ticket", "it", "the plan" are references, not
@@ -246,6 +281,9 @@ They are options, not content.
   signal says points to (its facts: an idea about links, a ticket about the plan).
   Never make a reference word the name of a new subject; if nothing fits, give no
   subject.
+- Your meaning and your subjects must agree: every piece of work the meaning
+  talks about is among the subjects. Give no subjects only when the meaning names
+  no identifiable work.
 - A subject the signal names that is not among the candidates is new: name it the
   way the signal does and set existing=false.
 - A signal that states facts about no identifiable subject gets no subjects.
@@ -255,7 +293,17 @@ They are options, not content.
   signal itself states something about it. At most 3 associations, and only ones
   that matter for what the signal says. A candidate that merely looks similar is
   neither a subject nor an association.
+- A correction ("no, new task", "not this ticket", "that was about X, not Y") says
+  the work is not the other subject. Mark that other subject wrongly_recorded=true
+  ONLY when the earlier messages show facts recorded on it ("recorded: X · ...");
+  otherwise it is just an association.
 - `quote` is the signal's own words that refer to the subject.
+- `meaning`: when the signal refers to earlier messages ("let us implement that",
+  "yes, good idea, but ...", "no, new task"), write what it says with those
+  references spelled out, as one self-contained statement, using the earlier
+  messages' own terms. Say what is agreed, requested or corrected; add nothing the
+  conversation does not say. A question stays a question ("Andrey asks whether
+  ...?"). Leave it empty when the signal stands on its own.
 - A header line `[sent ... · source ...]` is metadata, never a subject.
 """
 
@@ -265,7 +313,12 @@ You check extracted claims against the signal they were extracted from.
 For every claim answer `supported`: true only when the signal itself states this
 fact about this subject. False when the subject is not the one the signal is
 about, when the fact is not stated, or when it was inferred from something other
-than the signal. Judge meaning, not wording; any language.
+than the signal. Judge meaning, not wording; any language. A signal may come with
+"Meaning in its conversation": what it says once its references to earlier
+messages are spelled out. A claim supported by that meaning is supported. A
+correction ("not this ticket, a new task") supports both the facts on the right
+subject and the same facts negated on the subject it says they were wrongly
+recorded on.
 
 Some claims list the labels memory already holds for that subject and property.
 When the claim states the same fact as one of them, or retracts it, set `same_as`
@@ -428,6 +481,7 @@ class PydanticAIClaimExtractor(ClaimExtractor):
             if 0 <= entry.signal_index < len(out):
                 out[entry.signal_index].subjects.extend(entry.subjects)
                 out[entry.signal_index].associations.extend(entry.associations)
+                out[entry.signal_index].meaning = entry.meaning or out[entry.signal_index].meaning
         return out
 
     def verify_claims(
@@ -444,7 +498,10 @@ class PydanticAIClaimExtractor(ClaimExtractor):
                 mine = [(cid, j) for cid, (si, j) in wanted.items() if si == i]
                 if not mine:
                     continue
-                lines = [f"### Signal", "", signal_header(sig) + sig.text, "", "Claims:"]
+                lines = ["### Signal", "", signal_header(sig) + sig.text]
+                if sig.meaning:
+                    lines += [f"Meaning in its conversation: {sig.meaning}"]
+                lines += ["", "Claims:"]
                 for cid, j in mine:
                     c = results[i].claims[j]
                     pol = " (NOT)" if c.polarity == "negated" else ""
@@ -484,7 +541,8 @@ class PydanticAIClaimExtractor(ClaimExtractor):
         self, signals: list[SignalInput], known_entities: list[str] | None = None,
         known_labels: list[str] | None = None,
     ) -> list[ExtractionResult]:
-        texts = [signal_header(s) + s.text + subjects_footer(s) for s in signals]
+        texts = [signal_header(s) + s.text + meaning_footer(s) + subjects_footer(s)
+                 for s in signals]
         return self.extract_batch(texts, known_entities, known_labels=known_labels)
 
     def extract_batch(

@@ -38,6 +38,7 @@ class Scripted(ClaimExtractor):
         self.unsupported: set[tuple[str, str]] = set()      # (text, entity)
         self.same_as: dict[tuple[str, str], str] = {}       # (text, value) -> label
         self.associations: dict[str, list[AssociatedSubject]] = {}
+        self.meanings: dict[str, str] = {}
         self.resolve_calls, self.extract_calls, self.verify_calls = [], [], []
 
     def extract(self, text, known_entities=None):
@@ -45,8 +46,8 @@ class Scripted(ClaimExtractor):
 
     def resolve_subjects(self, signals, candidates, conversations=None):
         self.resolve_calls.append((signals, candidates, conversations))
-        return [Resolution(self.subjects.get(s.text, []), self.associations.get(s.text, []))
-                for s in signals]
+        return [Resolution(self.subjects.get(s.text, []), self.associations.get(s.text, []),
+                           self.meanings.get(s.text, "")) for s in signals]
 
     def extract_signals(self, signals, known_entities=None, known_labels=None):
         self.extract_calls.append((signals, known_entities, known_labels))
@@ -218,6 +219,7 @@ def test_a_reply_is_read_in_its_thread_with_the_ticket_its_focus_is_tracked_in(s
                                                in_focus=True)]
     svc.ext.associations[reply] = [AssociatedSubject(name="LIFT-22", entity_type="ticket",
                                                      reason="earlier followup work, done")]
+    svc.ext.meanings[reply] = "LIFT-38 is done"
     reply_id = said(svc, reply, T + 60, "100.0")
     svc.sleep()
 
@@ -225,9 +227,15 @@ def test_a_reply_is_read_in_its_thread_with_the_ticket_its_focus_is_tracked_in(s
     roles = {c.name: c.role for c in cands[0]}
     assert roles["followup-3"] == "focus" and roles["LIFT-38"] == "linked"
     assert convs[0].focus == ("followup-3 (feature)",)
-    assert convs[0].recent == ("[1 min earlier] followup-3|requirement|landing link",)
-
+    assert convs[0].recent == ("[1 min earlier] followup-3|requirement|landing link"
+                               " (recorded: followup-3 · requirement = landing link)",)
     record = svc.signal(reply_id)
+    # extraction never sees the raw conversation; it gets the resolve step's meaning
+    extracted = svc.ext.extract_calls[-1][0][0]
+    assert extracted.meaning == "LIFT-38 is done"
+    assert svc.ext.verify_calls[-1][0][0].meaning == "LIFT-38 is done"
+    assert record.metadata["meaning"] == "LIFT-38 is done"
+
     assert record.context == "slack:C1:100.0" and record.context_parent == "slack:C1"
     assert record.metadata["focus"] == ["followup-3 (feature)"]
     assert record.metadata["associations"][0]["name"] == "LIFT-22"
@@ -276,3 +284,14 @@ def test_same_words_in_another_conversation_are_another_signal(svc):
     assert one != two
     sig_id, stored, _ = svc.remember("anything|idea|done", "slack", "t")
     assert stored and sig_id not in (one, two)           # no context: the old identity
+
+
+def test_messages_read_in_one_tick_see_what_the_earlier_ones_recorded(svc):
+    a, b = "followup-3|idea|a", "followup-3|decision_state|idea"
+    svc.ext.subjects[a] = [subject("followup-3", False)]
+    svc.ext.subjects[b] = [subject("followup-3", True)]
+    said(svc, a, T, "500.0")
+    said(svc, b, T + 30, "500.0")
+    svc.sleep()                                   # both in one tick, not yet written
+    conv = svc.ext.resolve_calls[-1][2][0]
+    assert conv.recent == ("[1 min earlier] followup-3|idea|a (recorded: followup-3 · idea = a)",)

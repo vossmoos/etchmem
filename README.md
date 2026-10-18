@@ -90,10 +90,17 @@ hard cases:
      linked to it by a declared relation, and the subjects that similar earlier
      signals and beliefs were about. Related knowledge it recalls is recorded
      as *associations*, never as subjects.
-   - *Claim extraction (mini model).* Typed claims about exactly those
-     subjects; the model sees the signal and its subjects, nothing else.
+   - *Claim extraction.* Typed claims about exactly those subjects. The model
+     sees the signal, its subjects and — for a reply that refers back — the
+     resolve step's *meaning* (references spelled out); never the raw
+     conversation. A question gives no claims.
    - *Verification (mini model).* A second reading drops claims the signal
      does not state, and maps a restated fact onto its existing label.
+
+   Measured on real team chat: run resolution and extraction on your top model
+   (`ETCHMEM_RESOLVE_MODEL`, `ETCHMEM_CLAIM_MODEL`); small models invent
+   subjects like "the link" and mislabel agreement and requests. Verification
+   (`ETCHMEM_VERIFY_MODEL`) is a yes/no check and runs well on a small model.
 3. **Routing gate (no LLM).** For each `(entity, property)` the gate inspects
    the claims and decides: **AGREE** (one value), **POLICY** (recency /
    source-trust / multi-value cardinality / retraction resolves it), or
@@ -421,6 +428,14 @@ are another signal.
   iteration, a ticket that already covers the work — is recorded on the
   signal with a reason, never as a claim. Whether to flag it is the client's
   call.
+- **Same area is not the same item.** A signal is about an existing item when
+  it names it, or refers to it while the conversation is about it. New work in
+  that item's area is a new subject, with the item as an association.
+- **Meaning.** A reply that refers back ("let us implement that", "yes, but
+  ...", "no, new task") is restated with its references spelled out, kept on
+  the signal as `metadata.meaning`, and extracted from. Agreement turns the
+  agreed work into requirements; a correction retracts exactly the facts that
+  were recorded on the wrong subject, and nothing else.
 - **Order.** Signals of one conversation are read in the order they were said,
   each seeing the ones before it; conversations run in parallel. A signal
   without a context is read as before, against the scope's knowledge alone.

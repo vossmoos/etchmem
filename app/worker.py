@@ -222,7 +222,7 @@ class Pipeline:
                 view, focus = self._conversation(sig, earlier)
                 (row,) = self._read([sig], [view], [focus])
                 out.append(row)
-                earlier.append((sig, row[1]))
+                earlier.append((sig, row[1], row[0], row[2]))
             return out
 
         if len(units) == 1:
@@ -267,6 +267,8 @@ class Pipeline:
                 if resolution is not None:
                     meta["subjects"] = [r.model_dump() for r in resolution.subjects]
                     meta["associations"] = [a.model_dump() for a in resolution.associations]
+                    if resolution.meaning:
+                        meta["meaning"] = resolution.meaning
                 if view is not None:
                     meta["focus"] = list(view.focus)
                 self._s.left.update_signal_metadata(rep.id, meta)
@@ -320,7 +322,11 @@ class Pipeline:
             # Extraction sees the message and its subjects only. Existing labels
             # are matched afterwards, by the verify step: shown to the extractor
             # they get restated instead of the message's own facts.
-            inputs = [replace(inp, subjects=tuple(f"{r.name} ({r.entity_type})" for r in rs.subjects))
+            inputs = [replace(inp, subjects=tuple(
+                              f"{r.name} ({r.entity_type})"
+                              + (" [wrongly recorded]" if getattr(r, "wrongly_recorded", False) else "")
+                              for r in rs.subjects),
+                              meaning=(rs.meaning or "").strip())
                       for inp, rs in zip(inputs, resolved)]
             names, labels = [], []
         results = _with_retry(lambda: self._extractor.extract_signals(
@@ -362,7 +368,7 @@ class Pipeline:
             recent = sorted(recent + around, key=lambda x: x.event_at)
         focus: list = []
         seen: set = set()
-        for prev, res in reversed(earlier):          # newest first
+        for prev, res, *_ in reversed(earlier):      # newest first
             same = (sig.context_id and prev.context_id == sig.context_id) or (
                 sig.context_parent and prev.context_parent == sig.context_parent
                 and at - prev.event_at <= window)
@@ -382,8 +388,24 @@ class Pipeline:
         focus = focus[:5]
         names = tuple(f"{f.name} ({f.type})" if hasattr(f, "id") else f"{f[0]} ({f[1]})"
                       for f in focus)
+        # Each earlier message with what was recorded from it. Messages read earlier
+        # in this lane are not written yet: their kept claims come from memory.
+        in_lane = {}
+        for prev, _res, result, keep in earlier:
+            if result is not None:
+                in_lane[prev.id] = [c for j, c in enumerate(result.claims)
+                                    if keep is None or (j < len(keep) and keep[j])]
+
+        def recorded(x) -> str:
+            if x.id in in_lane:
+                facts = [f"{c.entity_name} · {c.property} = {c.value}" for c in in_lane[x.id]]
+            else:
+                facts = [f"{c.entity_name} · {c.property} = {c.value}"
+                         for c in left.claims_for_signal(x.id)]
+            return f" (recorded: {'; '.join(facts[:4])})" if facts else ""
+
         lines = tuple(f"[{_ago(at - x.event_at)}] " + x.content.replace("\n", " ")[:300]
-                      for x in recent[-5:])
+                      + recorded(x) for x in recent[-5:])
         return ConversationView(focus=names, recent=lines), focus
 
     def _candidates(self, sig, focus=()) -> list[tuple[SubjectCandidate, dict[str, list[str]]]]:
