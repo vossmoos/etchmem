@@ -16,6 +16,7 @@ Tools:
   stats         — queue depths + counts
   etch_history  — version timeline of one etch
   dossier       — full provenance of one etch: versions, claims, raw signals
+  signal        — one signal: its status, what it is about, the claims from it
 """
 from __future__ import annotations
 
@@ -33,7 +34,8 @@ mcp = FastMCP(
         "(one subject, exhaustive) or `etches` (filtered by scope, property and "
         "entity type, exhaustive). Use `sleep` to force "
         "a consolidation tick, `stats` for queue depths, `etch_history` for "
-        "the version timeline of one belief, `dossier` for why the system believes it."
+        "the version timeline of one belief, `dossier` for why the system believes it, "
+        "`signal` for what one deposited signal became."
     ),
     stateless_http=True,
     json_response=True,
@@ -203,3 +205,15 @@ def dossier(etch_id: str) -> dict[str, Any]:
     if d is None:
         return {"error": f"unknown etch {etch_id!r}"}
     return d.model_dump()
+
+
+@mcp.tool()
+def signal(signal_id: str) -> dict[str, Any]:
+    """What one deposited signal became: its pipeline status (new, batched,
+    extracted), the subjects it was found to be about (`metadata.subjects`, with
+    the words that refer to each and why), and every claim extracted from it.
+    Use the id `remember` returned."""
+    s = _svc().signal(signal_id)
+    if s is None:
+        return {"error": f"unknown signal {signal_id!r}"}
+    return s.model_dump()

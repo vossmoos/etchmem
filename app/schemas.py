@@ -311,6 +311,22 @@ class SignalOut(BaseModel):
     occurred_at: float = 0.0
 
 
+class SignalRecordResponse(BaseModel):
+    """One signal as etchmem recorded it: what it said, how far it got through
+    the pipeline, what it was found to be about, and the claims taken from it."""
+    id: str
+    content: str | None = Field(None, description="Withheld when claims anonymization is on.")
+    source: str
+    scope: str
+    status: str = Field(..., description="new | batched | extracted")
+    canonical_id: str | None = Field(None, description="The duplicate cluster's representative.")
+    metadata: dict = Field(default_factory=dict,
+                           description="As deposited, plus `subjects` once resolved.")
+    created_at: float = 0.0
+    occurred_at: float = 0.0
+    claims: list[ClaimOut] = Field(default_factory=list)
+
+
 class DossierResponse(BaseModel):
     """Full provenance view of one belief: the etch, its version timeline,
     the claims that formed it, and the raw signals behind those claims."""

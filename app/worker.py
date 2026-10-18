@@ -20,10 +20,11 @@ import logging
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
-from app.agents import ClaimExtractor, ConflictResolver, ExtractionResult, SignalInput
+from app.agents import (ClaimExtractor, ConflictResolver, ExtractionResult, SignalInput,
+                        SubjectCandidate)
 from app.anonymize import ANON_ENTITY_LABELS, scrub
 from app.config import settings
 from app.dedup import group_duplicates
@@ -50,7 +51,7 @@ class TickSummary:
     etches_updated: int = 0
     contested: int = 0
     claims_dropped: int = 0          # subjects declared `ignore: true` in ext/
-    claims_ungrounded: int = 0       # identifier subjects the signal never names
+    claims_unsupported: int = 0      # claims the verify step found the signal not to state
     subject_retries: int = 0         # signals re-read after a compound entity_name
     relations_resolved: int = 0      # claim values resolved to an entity (edges)
     # How subjects were identified this tick — see entities.ResolutionStats.
@@ -108,6 +109,17 @@ def _with_retry(fn):
                         e, attempt + 1, settings.llm_max_retries, delay)
             time.sleep(delay)
     raise last  # type: ignore[misc]
+
+
+def _align_labels(result: ExtractionResult, checks, labels) -> ExtractionResult:
+    """Use the existing label the verify step named, when it is one that exists for
+    that subject and property; otherwise keep the extracted value."""
+    claims = []
+    for c, check, known in zip(result.claims, checks, labels):
+        if check.same_as and check.same_as in known and check.same_as != c.value:
+            c = c.model_copy(update={"value": check.same_as})
+        claims.append(c)
+    return ExtractionResult(claims=claims)
 
 
 class Pipeline:
@@ -180,25 +192,54 @@ class Pipeline:
         # One scope per prompt, so each chunk gets its own scope's context.
         chunks = [group[i:i + size] for group in by_scope.values()
                   for i in range(0, len(group), size)]
-        chunk_results: list[list[ExtractionResult] | None] = [None] * len(chunks)
+        chunk_results: list[tuple | None] = [None] * len(chunks)
 
-        context = self._extraction_context(representatives)
+        # Candidate subjects are read here, before the threads: DuckDB stays
+        # single-threaded and only the model calls fan out.
+        prepared = [[self._candidates(s) for s in chunk] for chunk in chunks]
 
-        def _run_chunk(chunk):
-            names, labels = context.get(chunk[0].scope, ([], []))
+        def _run_chunk(i):
+            chunk, cands = chunks[i], prepared[i]
             inputs = [SignalInput(text=s.content, sent_at=s.event_at, source=s.source)
                       for s in chunk]
-            return _with_retry(lambda: self._extractor.extract_signals(
+            candidates = [[c for c, _ in per] for per in cands]
+            known = {(c.name, prop): vals for per in cands for c, by_prop in per
+                     for prop, vals in by_prop.items()}
+            resolved = _with_retry(lambda: self._extractor.resolve_subjects(inputs, candidates))
+            if resolved is None:
+                # No resolve step (stubs, simple backends): the candidates are hints.
+                names = list(dict.fromkeys(c.name for per in candidates for c in per))
+                labels = [f"{name} · {prop}: " + ", ".join(vals)
+                          for (name, prop), vals in known.items() if name in names]
+            else:
+                # Extraction sees the message and its subjects only. Existing labels
+                # are matched afterwards, by the verify step: shown to the extractor
+                # they get restated instead of the message's own facts.
+                inputs = [replace(inp, subjects=tuple(f"{r.name} ({r.entity_type})" for r in rs))
+                          for inp, rs in zip(inputs, resolved)]
+                names, labels = [], []
+            results = _with_retry(lambda: self._extractor.extract_signals(
                 inputs, names or None, labels or None))
+            checks = None
+            if settings.verify_claims:
+                claim_labels = [[known.get((c.entity_name, c.property), []) for c in r.claims]
+                                for r in results]
+                checks = _with_retry(lambda: self._extractor.verify_claims(
+                    inputs, results, claim_labels))
+                if checks is not None:
+                    results = [_align_labels(r, row, lab)
+                               for r, row, lab in zip(results, checks, claim_labels)]
+            keep = None if checks is None else [[c.supported for c in row] for row in checks]
+            return results, resolved, keep
 
         if len(chunks) == 1:
             try:
-                chunk_results[0] = _run_chunk(chunks[0])
+                chunk_results[0] = _run_chunk(0)
             except Exception:
                 log.exception("extraction failed; signals stay 'batched' and retry next tick")
         else:
             with ThreadPoolExecutor(max_workers=max(1, settings.extract_concurrency)) as pool:
-                futures = {pool.submit(_run_chunk, c): i for i, c in enumerate(chunks)}
+                futures = {pool.submit(_run_chunk, i): i for i in range(len(chunks))}
                 for fut in as_completed(futures):
                     i = futures[fut]
                     try:
@@ -208,25 +249,37 @@ class Pipeline:
                                       "'batched' and retry next tick", i)
 
         now = time.time()
-        reps_with_results = [
-            (rep, result)
-            for chunk, results in zip(chunks, chunk_results) if results is not None
-            for rep, result in zip(chunk, results)
-        ]
+        reps_with_results = []
+        for chunk, out in zip(chunks, chunk_results):
+            if out is None:
+                continue
+            results, resolved, keep = out
+            for k, (rep, result) in enumerate(zip(chunk, results)):
+                reps_with_results.append(
+                    (rep, result, resolved[k] if resolved is not None else None,
+                     keep[k] if keep is not None else None))
 
-        for rep, result in reps_with_results:
+        for rep, result, resolved, keep in reps_with_results:
             members = self._s.left.signals_with_canonical(rep.id)
             sources = sorted({m.source for m in members})
             evidence_ids = sorted({m.id for m in members})
 
-            claims = self._repair_compound_subjects(rep, result.claims, summary)
-            for ec in claims:
-                if not self._registry.grounded(ec.entity_type, ec.entity_name, rep.content):
-                    # Subject came from the known-entities hint, not the signal.
-                    log.info("dropping ungrounded claim %s · %s (signal %s)",
+            kept = []
+            for j, ec in enumerate(result.claims):
+                if keep is not None and not (j < len(keep) and keep[j]):
+                    log.info("dropping unsupported claim %s · %s (signal %s)",
                              ec.entity_name, ec.property, rep.id[:12])
-                    summary.claims_ungrounded += 1
+                    summary.claims_unsupported += 1
                     continue
+                kept.append(ec)
+            if resolved is not None:
+                # What the signal was found to be about, and why: part of the record.
+                self._s.left.update_signal_metadata(rep.id, {
+                    **(rep.metadata or {}),
+                    "subjects": [r.model_dump() for r in resolved]})
+
+            claims = self._repair_compound_subjects(rep, kept, summary)
+            for ec in claims:
                 subjects = self._subjects_for(ec, rep.scope)
                 if not subjects:
                     # Ignored subject type, or a name we could not attach a fact
@@ -242,25 +295,36 @@ class Pipeline:
 
         summary.entities = self._entities.stats.to_dict()
 
-    def _extraction_context(self, signals) -> dict[str, tuple[list[str], list[str]]]:
-        """Per scope: subject names and existing labels the extractor should reuse.
+    def _candidates(self, sig) -> list[tuple[SubjectCandidate, dict[str, list[str]]]]:
+        """Existing subjects most similar to this signal, with what is known
+        about them and their labels (for reusing a label, or retracting it).
 
-        Without this every message invents its own spelling of a subject and
-        its own label for a fact, so corroboration and retraction never meet.
+        Similarity only proposes; the resolve step decides whether the signal
+        refers to any of them.
         """
-        if settings.extract_known_entities <= 0 and settings.extract_known_labels <= 0:
-            return {}
+        n = max(0, settings.subject_candidates)
+        if n == 0 or not sig.embedding:
+            return []
         label_props = set(settings.multi_value_set) | {
             name for name, spec in self._registry.by_name.items() if spec.detail}
-        out = {}
-        for scope in {s.scope for s in signals}:
-            try:
-                out[scope] = self._s.right.recent_context(
-                    scope, entities=max(0, settings.extract_known_entities),
-                    label_properties=label_props,
-                    labels_per_belief=max(0, settings.extract_known_labels))
-            except Exception:
-                log.exception("could not build extraction context for scope %s", scope)
+        per_label = max(0, settings.extract_known_labels)
+        out: list[tuple[SubjectCandidate, dict[str, list[str]]]] = []
+        for ent, _sim in self._s.right.search_entities(sig.embedding, top_k=n * 4):
+            if ent.scope != sig.scope or self._registry.is_ignored(ent.type):
+                continue
+            etches = self._s.right.etches_for_entity(ent.id)
+            facts = tuple(f"{e.property}: {e.current_value[:80]}" for e in etches[:6])
+            labels: dict[str, list[str]] = {}
+            for e in etches:
+                if e.property not in label_props or per_label == 0:
+                    continue
+                vals = [v["value"] for v in e.values] or \
+                    [x.strip() for x in (e.current_value or "").split(",") if x.strip()]
+                if vals:
+                    labels[e.property] = vals[:per_label]
+            out.append((SubjectCandidate(ent.name, ent.type, facts), labels))
+            if len(out) >= n:
+                break
         return out
 
     def _compound(self, ec) -> bool:

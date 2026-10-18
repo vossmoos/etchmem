@@ -386,6 +386,25 @@ class LeftStore:
                     ORDER BY created_at""", ids).fetchall()
         return [self._row_to_signal(r) for r in rows]
 
+    def get_signal(self, signal_id: str) -> Signal | None:
+        found = self.signals_by_ids([signal_id])
+        return found[0] if found else None
+
+    def claims_for_signal(self, signal_id: str) -> list[Claim]:
+        """Every claim this signal is evidence for (including as a duplicate)."""
+        with self._lock:
+            rows = self._con.execute(
+                f"""SELECT {_CLAIM_COLS} FROM claims
+                    WHERE evidence_signal_ids LIKE '%' || ? || '%'
+                    ORDER BY created_at""", [signal_id]).fetchall()
+        return [c for c in (self._row_to_claim(r) for r in rows)
+                if signal_id in c.evidence_signal_ids]
+
+    def update_signal_metadata(self, signal_id: str, metadata: dict[str, Any]) -> None:
+        with self._lock:
+            self._con.execute("UPDATE signals SET metadata = ? WHERE id = ?",
+                              [_j(metadata), signal_id])
+
     def set_claims_status(self, ids: list[str], status: str) -> None:
         if not ids:
             return

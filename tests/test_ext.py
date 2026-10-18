@@ -85,23 +85,3 @@ def test_last_file_wins_on_duplicate(tmp_path):
     """)
     reg = load_extensions(str(tmp_path))
     assert reg.by_name["churn_risk"].values == ("low", "medium", "high")
-
-
-def test_grounded_requires_identifier_in_signal(tmp_path):
-    _write(tmp_path, "lift.yaml", r"""
-        domain: lift
-        entities:
-          - type: ticket
-            match: exact
-            identifier_pattern: '(?i)\bLIFT[-\s]?\d+\b'
-          - type: feature
-    """)
-    reg = load_extensions(str(tmp_path))
-    text = "Andrey: we need to develop a plan for etchmem, to identify all the needed entities."
-    # A ticket the signal never names came from the known-entities hint.
-    assert not reg.grounded("ticket", "LIFT-18", text)
-    assert not reg.grounded(None, "LIFT-18", text)
-    # Named in the text, in any spelling of the identifier.
-    assert reg.grounded("ticket", "LIFT-18", "please move lift 18 to review")
-    # Fuzzy subjects cannot be checked and pass.
-    assert reg.grounded("feature", "etchmem", text)

@@ -22,7 +22,7 @@ from app.hashing import content_hash
 from app.schemas import (
     AssociateNode, AssociateResponse, ClaimOut, DossierResponse, EdgeOut,
     EtchListResponse, KnowledgeResponse, EntityOut, EtchOut, ListedEtchOut, RecallResult,
-    SignalOut, VersionOut,
+    SignalOut, SignalRecordResponse, VersionOut,
 )
 from app.stores import S_BATCHED, S_EXTRACTED, S_NEW, Signal, Stores
 from app.worker import Pipeline
@@ -416,6 +416,28 @@ class MemoryService:
                 for s in self.stores.left.signals_by_ids(list(sig_ids))]
         return DossierResponse(etch=etch, versions=versions, claims=claims,
                                signals=signals, signals_omitted=signals_omitted)
+
+    def signal(self, signal_id: str) -> SignalRecordResponse | None:
+        """One signal and what came of it. A duplicate reports the claims of its
+        cluster's representative, since those claims carry it as evidence too."""
+        sig = self.stores.left.get_signal(signal_id)
+        if sig is None:
+            return None
+        claims = [
+            ClaimOut(
+                id=c.id, entity_name=c.entity_name, property=c.property,
+                value=c.value, polarity=c.polarity, detail=c.detail,
+                corroboration_count=c.corroboration_count, confidence=c.confidence,
+                sources=c.sources, evidence_signal_ids=c.evidence_signal_ids,
+                scope=c.scope, event_time=c.event_time, ingest_time=c.ingest_time,
+                created_at=c.created_at)
+            for c in self.stores.left.claims_for_signal(signal_id)]
+        hidden = settings.claims_anonymization
+        return SignalRecordResponse(
+            id=sig.id, content=None if hidden else sig.content, source=sig.source,
+            scope=sig.scope, status=sig.status, canonical_id=sig.canonical_id,
+            metadata=sig.metadata or {}, created_at=sig.created_at,
+            occurred_at=sig.event_at, claims=claims)
 
     # ── stats ────────────────────────────────────────────────────────────────
 

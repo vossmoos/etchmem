@@ -334,30 +334,6 @@ class ExtRegistry:
         """
         return len(self.identifier_candidates(entity_type, name))
 
-    def grounded(self, entity_type: str | None, name: str, text: str) -> bool:
-        """Is a claim's identifier subject actually named in its signal?
-
-        The known-entities and known-labels hints put every recent ticket key in
-        the prompt, and a vague message ("plan all the needed entities") can make
-        the model attach its fact to each of them. A subject carrying a declared
-        identifier must therefore appear in the signal text itself. Subjects
-        without an identifier (fuzzy names) cannot be checked and pass. When the
-        claim has no declared type, every declared pattern that matches is checked.
-        """
-        spec = self.entity_spec(entity_type)
-        specs = [spec] if spec is not None else self.entities
-        for s in specs:
-            rx = s.regex
-            if rx is None:
-                continue
-            keys = {normalize_identifier(m.group(0)) for m in rx.finditer(name)}
-            if not keys:
-                continue
-            present = {normalize_identifier(m.group(0)) for m in rx.finditer(text)}
-            if not keys <= present:
-                return False
-        return True
-
     def relation_type(self, property: str) -> str | None:
         """The entity type this property's value points at, or None (a literal)."""
         spec = self.by_name.get(property)

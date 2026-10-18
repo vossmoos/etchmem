@@ -805,10 +805,7 @@ def _graph_service(tmp_path):
 
     svc = MemoryService(embedder=_Lexical(), extractor=Ext(), resolver=Res())
     for k in ("a", "b", "c"):
-        # The record names its subjects, as a real one does: claims about an
-        # identifier the signal never mentions are dropped as ungrounded.
-        names = " ".join(sorted({e for e, _, _, _ in FACTS[k]}))
-        svc.remember(f"{k} | record {names}", source="ticket-resolved", scope="innoxel",
+        svc.remember(f"{k} | record", source="ticket-resolved", scope="innoxel",
                      occurred_at="2020-01-01")
     summary = svc.sleep()
     return svc, summary

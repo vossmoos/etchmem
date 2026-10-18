@@ -94,11 +94,21 @@ class Settings(BaseSettings):
 
     # ── Extraction context ─────────────────────────────────────────────────
     # The extractor is told when each signal was sent and by which source, so
-    # "by Friday" or "yesterday" become real dates. It is also given the names
-    # of recently active entities and existing labels in the same scope, so it
-    # reuses them instead of inventing near-duplicates. 0 disables the hint.
-    extract_known_entities: int = 50
+    # "by Friday" or "yesterday" become real dates.
+    #
+    # Subjects are resolved before claims are extracted. Each signal is offered
+    # the `subject_candidates` existing subjects most similar to it (embedding
+    # search, same scope), and a model decides which of them, if any, the
+    # signal refers to. Extraction then sees only those subjects and their
+    # labels (`extract_known_labels` per subject and property), so it reuses
+    # names and labels without being steered towards unrelated subjects.
+    # `verify_claims`: a model checks every extracted claim against its signal
+    # and drops the ones the signal does not support. Empty model = claim_model.
+    subject_candidates: int = 8
     extract_known_labels: int = 10             # labels per (subject, property)
+    resolve_model: str = ""
+    verify_claims: bool = True
+    verify_model: str = ""
 
     # ── Event time ─────────────────────────────────────────────────────────
     # Which wins when a signal declares `occurred_at` AND the extractor reads a
@@ -187,8 +197,11 @@ _ENV_ALIASES = {
     "retraction_weight": "ETCHMEM_RETRACTION_WEIGHT",
     "agreement_half_life_days": "ETCHMEM_AGREEMENT_HALF_LIFE_DAYS",
     "trust_same_odds_ratio": "ETCHMEM_TRUST_SAME_ODDS_RATIO",
-    "extract_known_entities": "ETCHMEM_EXTRACT_KNOWN_ENTITIES",
+    "subject_candidates": "ETCHMEM_SUBJECT_CANDIDATES",
     "extract_known_labels": "ETCHMEM_EXTRACT_KNOWN_LABELS",
+    "resolve_model": "ETCHMEM_RESOLVE_MODEL",
+    "verify_claims": "ETCHMEM_VERIFY_CLAIMS",
+    "verify_model": "ETCHMEM_VERIFY_MODEL",
     "subject_retry_enabled": "ETCHMEM_SUBJECT_RETRY_ENABLED",
     "claims_anonymization": "ETCHMEM_CLAIMS_ANONYMIZATION",
     "worker_enabled": "ETCHMEM_WORKER_ENABLED",

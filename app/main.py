@@ -28,7 +28,7 @@ from fastapi import FastAPI, HTTPException, Query
 from app import __version__
 from app.config import settings
 from app.schemas import (
-    DossierResponse, EtchListResponse, ExportResponse, HealthResponse, HistoryResponse, RecallRequest,
+    DossierResponse, SignalRecordResponse, EtchListResponse, ExportResponse, HealthResponse, HistoryResponse, RecallRequest,
     RecallResponse, RememberRequest, RememberResponse, SleepResponse, StatsResponse,
     VersionOut,
     KnowledgeResponse,
@@ -163,6 +163,14 @@ def dossier(etch_id: str) -> DossierResponse:
     if d is None:
         raise HTTPException(status_code=404, detail=f"Unknown etch: {etch_id}")
     return d
+
+
+@app.get("/signal/{signal_id}", response_model=SignalRecordResponse)
+def signal(signal_id: str) -> SignalRecordResponse:
+    s = get_service().signal(signal_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail=f"Unknown signal: {signal_id}")
+    return s
 
 
 @app.get("/stats", response_model=StatsResponse)

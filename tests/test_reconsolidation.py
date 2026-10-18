@@ -39,7 +39,7 @@ def _defaults(monkeypatch):
                         "trust_same_odds_ratio": 3.0, "default_source_trust": 0.5,
                         "multi_value_properties": "", "trust_gap": 0.3,
                         "occurred_at_precedence": "extracted",
-                        "extract_known_entities": 50, "extract_known_labels": 10,
+                        "subject_candidates": 8, "extract_known_labels": 10, "verify_claims": True,
                         "source_trust_json": "{}", "extract_min_batch": 1}.items():
         monkeypatch.setattr(S, name, value)
 
