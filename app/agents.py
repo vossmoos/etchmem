@@ -12,7 +12,7 @@ Model strings come from settings and are swapped with one env var each.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
@@ -145,10 +145,23 @@ def subjects_footer(sig: SignalInput) -> str:
 
 @dataclass(frozen=True)
 class SubjectCandidate:
-    """An existing subject that looks similar to a signal (by embedding)."""
+    """An existing subject offered to the resolve step.
+
+    role: "focus" (the conversation has been about it), "linked" (tied to a focus
+    subject by a declared relation), or "similar" (found by embedding search).
+    """
     name: str
     entity_type: str
     facts: tuple[str, ...] = ()
+    role: str = "similar"
+
+
+@dataclass(frozen=True)
+class ConversationView:
+    """Where a signal was said: what that conversation has been about so far
+    (focus subjects, most recent first) and its last messages before this one."""
+    focus: tuple[str, ...] = ()
+    recent: tuple[str, ...] = ()
 
 
 class ResolvedSubject(BaseModel):
@@ -158,11 +171,29 @@ class ResolvedSubject(BaseModel):
     existing: bool = Field(..., description="True when this is one of the candidates.")
     quote: str = Field(..., description="The words of the signal that refer to this subject.")
     reason: str = Field("", description="One short sentence: why this subject.")
+    in_focus: bool = Field(False, description="True when this is a subject the "
+                                              "conversation was already about.")
+
+
+class AssociatedSubject(BaseModel):
+    """Related knowledge recalled while reading a signal: worth knowing, but not
+    what the signal is about. Recorded; never a claim."""
+    name: str
+    entity_type: str
+    reason: str = Field(..., description="Why it is related, in one short sentence.")
 
 
 class SignalSubjects(BaseModel):
     signal_index: int
     subjects: list[ResolvedSubject] = Field(default_factory=list)
+    associations: list[AssociatedSubject] = Field(default_factory=list)
+
+
+@dataclass
+class Resolution:
+    """The resolve step's answer for one signal."""
+    subjects: list[ResolvedSubject] = field(default_factory=list)
+    associations: list[AssociatedSubject] = field(default_factory=list)
 
 
 class BatchResolution(BaseModel):
@@ -192,16 +223,38 @@ class BatchVerification(BaseModel):
 _RESOLVE_SYSTEM_SUBJECTS = """\
 You decide what each signal is ABOUT, before any facts are extracted from it.
 
-For every '### Signal <i>' return the subjects it states facts about. Each signal
-comes with candidates: existing subjects that look similar. They are options, not
-content.
+For every '### Signal <i>' return the subjects it states facts about.
+
+Read a signal in its conversation first. It may come with "Conversation focus"
+(what the conversation it was said in has been about so far) and "Earlier in the
+conversation" (its last messages, and the last ones around it, each with how long
+before it was said). Unless the signal clearly turns to something else, it is about
+the conversation's focus: "this ticket", "it", "the link" refer to what the
+conversation is discussing. A reply like "No, ..." continues an earlier message;
+judge from the content and the time gap whether that earlier message still frames
+it. Mark subjects the conversation was already about in_focus=true.
+
+Each signal also comes with candidates: existing subjects, labelled [focus],
+[linked] (tied to a focus subject, e.g. the ticket that tracks it) or [similar].
+They are options, not content.
 - Choose a candidate only when the signal itself refers to it: by its name, its
   key, or a description a reader would match to it, in any language or wording.
 - Similarity alone is not a reference. A candidate the signal does not refer to
   is not a subject of the signal, however close it looks.
-- A subject the signal refers to that is not among the candidates is new: name
-  it the way the signal does and set existing=false.
+- Words like "the link", "this ticket", "it", "the plan" are references, not
+  names. Resolve them to the conversation focus, or to the candidate that what the
+  signal says points to (its facts: an idea about links, a ticket about the plan).
+  Never make a reference word the name of a new subject; if nothing fits, give no
+  subject.
+- A subject the signal names that is not among the candidates is new: name it the
+  way the signal does and set existing=false.
 - A signal that states facts about no identifiable subject gets no subjects.
+- Recalling a related subject is not the same as the signal being about it. An
+  earlier iteration of the same work, a ticket that already covers it, a dependency
+  goes into `associations` with a short reason, never into subjects, unless the
+  signal itself states something about it. At most 3 associations, and only ones
+  that matter for what the signal says. A candidate that merely looks similar is
+  neither a subject nor an association.
 - `quote` is the signal's own words that refer to the subject.
 - A header line `[sent ... · source ...]` is metadata, never a subject.
 """
@@ -277,9 +330,12 @@ class ClaimExtractor(ABC):
 
     def resolve_subjects(
         self, signals: list[SignalInput], candidates: list[list[SubjectCandidate]],
-    ) -> list[list[ResolvedSubject]] | None:
-        """Which subjects each signal is about. None: this backend has no resolve
-        step, and the pipeline falls back to offering the candidates as hints."""
+        conversations: list[ConversationView | None] | None = None,
+    ) -> list["Resolution | list[ResolvedSubject]"] | None:
+        """Which subjects each signal is about, read in its conversation, plus
+        related subjects recalled on the way (associations). None: this backend has
+        no resolve step, and the pipeline offers the candidates as hints instead.
+        A plain list per signal is taken as subjects without associations."""
         return None
 
     def verify_claims(
@@ -347,21 +403,31 @@ class PydanticAIClaimExtractor(ClaimExtractor):
 
     def resolve_subjects(
         self, signals: list[SignalInput], candidates: list[list[SubjectCandidate]],
-    ) -> list[list[ResolvedSubject]] | None:
+        conversations: list[ConversationView | None] | None = None,
+    ) -> list[Resolution] | None:
         blocks = []
         for i, (sig, cands) in enumerate(zip(signals, candidates)):
-            lines = [f"### Signal {i}", "", signal_header(sig) + sig.text, "", "Candidates:"]
+            lines = [f"### Signal {i}", ""]
+            conv = conversations[i] if conversations else None
+            if conv is not None and (conv.focus or conv.recent):
+                lines.append("Conversation focus: " + (", ".join(conv.focus) or "none yet"))
+                if conv.recent:
+                    lines.append("Earlier in the conversation:")
+                    lines += [f"- {m}" for m in conv.recent]
+                lines.append("")
+            lines += ["Signal:", signal_header(sig) + sig.text, "", "Candidates:"]
             for c in cands:
                 facts = "; ".join(c.facts)
-                lines.append(f"- {c.name} ({c.entity_type})" + (f": {facts}" if facts else ""))
+                lines.append(f"- [{c.role}] {c.name} ({c.entity_type})" + (f": {facts}" if facts else ""))
             if not cands:
                 lines.append("- none")
             blocks.append("\n".join(lines))
         result = self._resolve_agent.run_sync("\n\n".join(blocks)).output
-        out: list[list[ResolvedSubject]] = [[] for _ in signals]
+        out = [Resolution() for _ in signals]
         for entry in result.signals:
             if 0 <= entry.signal_index < len(out):
-                out[entry.signal_index].extend(entry.subjects)
+                out[entry.signal_index].subjects.extend(entry.subjects)
+                out[entry.signal_index].associations.extend(entry.associations)
         return out
 
     def verify_claims(

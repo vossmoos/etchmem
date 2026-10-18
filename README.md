@@ -82,8 +82,18 @@ hard cases:
 
 1. **Stage 1 — dedup (no LLM).** Embeddings group near-duplicate signals onto
    a canonical representative, preserving every source for corroboration.
-2. **Stage 2 — claim extraction (mini model).** `claim_agent` turns a signal
-   into typed claims, resolving/creating the canonical entity.
+2. **Stage 2 — what is it about, then what does it say.**
+   - *Subject resolution (top model by default, `ETCHMEM_RESOLVE_MODEL`).* A
+     model decides what the signal is about, reading it in its conversation
+     first (see [Conversations](#conversations-context-focus-associations)).
+     Candidates are options, not content: the conversation's focus, what is
+     linked to it by a declared relation, and the subjects that similar earlier
+     signals and beliefs were about. Related knowledge it recalls is recorded
+     as *associations*, never as subjects.
+   - *Claim extraction (mini model).* Typed claims about exactly those
+     subjects; the model sees the signal and its subjects, nothing else.
+   - *Verification (mini model).* A second reading drops claims the signal
+     does not state, and maps a restated fact onto its existing label.
 3. **Routing gate (no LLM).** For each `(entity, property)` the gate inspects
    the claims and decides: **AGREE** (one value), **POLICY** (recency /
    source-trust / multi-value cardinality / retraction resolves it), or
@@ -94,7 +104,10 @@ hard cases:
    agents know what they know and how well they know it.
 
 Each model is a Pydantic-AI model string, swapped via one env var
-(`ETCHMEM_CLAIM_MODEL`, `ETCHMEM_ETCH_MODEL`). No vendor lock-in.
+(`ETCHMEM_CLAIM_MODEL`, `ETCHMEM_ETCH_MODEL`, `ETCHMEM_RESOLVE_MODEL`,
+`ETCHMEM_VERIFY_MODEL`). No vendor lock-in. Every judgement about language —
+what a record is about, whether it states a fact, whether two wordings are the
+same fact — is a model's; the code only counts and compares identities.
 
 ## Claim extensions (declarative domain vocabulary)
 
@@ -376,16 +389,45 @@ policy `trust_dispute`. A very large value restores pure recency.
 Each signal reaches the extractor with a header,
 `[sent 2026-10-16 (Fri) 14:05 UTC · source slack]`, built from `occurred_at`
 (else ingest time) and `source`. Relative dates in the text ("by Friday",
-"yesterday") are resolved against it into absolute ISO dates. With it, per
-scope, come the names of recently active subjects
-(`ETCHMEM_EXTRACT_KNOWN_ENTITIES`, default 50) and the labels already held for
-multi-value and `detail: true` properties (`ETCHMEM_EXTRACT_KNOWN_LABELS`,
-default 10 per belief, retracted ones included). The extractor reuses them, so
-the same fact keeps one label (corroboration) and "we dropped X" negates
-exactly the X that was asserted (retraction). `0` turns either hint off.
+"yesterday") are resolved against it into absolute ISO dates. It also gets the
+subjects the resolve step found (`[subjects: ...]`) — and nothing else from
+memory: lists of known names or labels pull vague records onto known subjects,
+and make small models restate old facts instead of the new one. Existing labels
+(`ETCHMEM_EXTRACT_KNOWN_LABELS`, default 10 per subject and property, retracted
+ones included) go to the verify step instead, which puts a restated fact on its
+existing label — so the same fact keeps one label (corroboration) and "we
+dropped X" negates exactly the X that was asserted (retraction).
 
 Existing beliefs pick up these rules the next time their `(entity, property)`
 is folded.
+
+## Conversations: context, focus, associations
+
+A message like "this ticket is done now" means something precise only in the
+conversation it was said in. Pass where it was said with `remember`:
+`context` (the conversation — a Slack thread, a ticket's comments, a meeting)
+and `context_parent` (the one around it — the channel). Plain ids the client
+chooses; etchmem never interprets them, and the same words in another context
+are another signal.
+
+- **Focus.** Each conversation keeps the subjects it has been about, most
+  recent first. A signal is read with that focus and its conversation's last
+  messages; around a thread, the channel's last messages are shown with their
+  age, and the model weighs whether they still frame it. The channel's focus
+  itself carries over into a new thread within `ETCHMEM_CONTEXT_WINDOW_SECONDS`
+  (7200). The focus reaches one hop through declared relations, so a
+  conversation about a feature knows the ticket that tracks it.
+- **Associations.** Related knowledge recalled while reading — an earlier
+  iteration, a ticket that already covers the work — is recorded on the
+  signal with a reason, never as a claim. Whether to flag it is the client's
+  call.
+- **Order.** Signals of one conversation are read in the order they were said,
+  each seeing the ones before it; conversations run in parallel. A signal
+  without a context is read as before, against the scope's knowledge alone.
+
+`GET /signal/{id}` shows a signal's context, the focus when it was said, its
+subjects (with the words that refer to each and `in_focus`), its associations
+and its claims. `GET /context/{id}` shows a conversation's focus and signals.
 
 ## Relations: when the value is another entity
 
@@ -489,7 +531,7 @@ its own container behind a real broker + Postgres/pgvector — see TODO.md.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /remember` | Deposit a raw signal (`source`, `scope`, `extract_mode`). |
+| `POST /remember` | Deposit a raw signal (`source`, `scope`, `extract_mode`, `occurred_at`, `context`, `context_parent`). |
 | `POST /recall` | Semantic recall over beliefs; `as_of` for time-travel. |
 | `POST /sleep` | Run one worker tick now (batch → extract → fold). |
 | `POST /export` | Dump all etches to JSON files. |
@@ -498,6 +540,8 @@ its own container behind a real broker + Postgres/pgvector — see TODO.md.
 | `GET /etches` | **Every** belief matching filters — `scope`, `property`, `entity_type` (repeat or comma-separate), `status`, `min_confidence`; paged with `limit`/`offset`, `total` counts all matches. Writes nothing to disk. |
 | `GET /etch/{id}/history` | Version timeline of one belief. |
 | `GET /etch/{id}/dossier` | Full provenance: etch + versions + claims + source signals. |
+| `GET /signal/{id}` | What one signal became: status, context, focus, subjects, associations, claims. |
+| `GET /context/{id}` | One conversation: its focus and its signals in order. |
 | `GET /stats` | Queue depths + counts (signals/claims/entities/etches/contested). |
 | `GET /health` | Liveness + active config. |
 | `GET /ui` | **Etchmem Beliefs Explorer** — built-in report UI. |
@@ -523,7 +567,7 @@ included). Disable the UI with `ETCHMEM_UI_ENABLED=false`.
 ## MCP interface
 
 The same operations are exposed as **MCP tools** — `remember`, `recall`,
-`know`, `etches`, `associate`, `sleep`, `export`, `stats`, `etch_history`, `dossier` — over streamable HTTP at
+`know`, `etches`, `associate`, `sleep`, `export`, `stats`, `etch_history`, `dossier`, `signal`, `context` — over streamable HTTP at
 `http://localhost:8000/mcp` (stateless, JSON responses). One process serves
 both protocols, so Claude Code / Claude Desktop / any MCP client can use
 etchmem as a memory backend directly:
@@ -625,8 +669,19 @@ Via environment / `.env` (see `.env.example`). Highlights:
   resolution: rank your sources, let policy settle disagreements.
 - `ETCHMEM_RETRACTION_WEIGHT` (0.1), `ETCHMEM_AGREEMENT_HALF_LIFE_DAYS` (14),
   `ETCHMEM_TRUST_SAME_ODDS_RATIO` (3) — how beliefs change over time (see above).
-- `ETCHMEM_EXTRACT_KNOWN_ENTITIES` (50), `ETCHMEM_EXTRACT_KNOWN_LABELS` (10) —
-  names and labels the extractor is asked to reuse.
+- `ETCHMEM_RESOLVE_MODEL` / `ETCHMEM_VERIFY_MODEL` — models for subject
+  resolution and claim verification (empty = `ETCHMEM_CLAIM_MODEL`). Give the
+  resolve step your top model: small models invent subjects like "the link"
+  instead of resolving them (measured).
+- `ETCHMEM_SUBJECT_CANDIDATES` (10) — similar subjects offered per signal, on
+  top of the conversation focus and what is linked to it.
+  `ETCHMEM_EXTRACT_KNOWN_LABELS` (10) — labels per subject and property shown
+  to the verify step. `ETCHMEM_VERIFY_CLAIMS` (true).
+- `ETCHMEM_CONTEXT_WINDOW_SECONDS` (7200) — how long a channel's focus carries
+  over into a new thread.
+- `ETCHMEM_EXTRACT_LLM_BATCH_SIZE` (6) / `ETCHMEM_EXTRACT_CONCURRENCY` (4) —
+  signals per model call and parallel calls. Use 1 with small models: several
+  signals in one prompt get their subjects and facts mixed.
 - `ETCHMEM_CLAIMS_ANONYMIZATION` — anonymize personal data in claims/etches
   (see above). Default `false`.
 - `ETCHMEM_WORKER_ENABLED`, `ETCHMEM_WORKER_INTERVAL_SECONDS`,

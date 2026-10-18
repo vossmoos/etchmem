@@ -54,6 +54,11 @@ class Signal:
     extract_mode: str = "deferred"          # "immediate" | "deferred"
     canonical_id: str | None = None         # representative signal for its dup cluster
     embedding: list[float] | None = None
+    # Where it was said, as the client addresses it: the conversation (a Slack
+    # thread, a ticket's comments, a meeting) and the one around it (the channel).
+    # Plain ids from the client; etchmem never interprets them.
+    context_id: str | None = None
+    context_parent: str | None = None
 
     @property
     def event_at(self) -> float:
@@ -148,6 +153,9 @@ def _u(s: str | None, default: Any) -> Any:
     return json.loads(s) if s else default
 
 
+_SIGNAL_COLS = """id, content, source, scope, metadata, embedding, created_at,
+                 occurred_at, expires_at, status, extract_mode, canonical_id,
+                 context_id, context_parent"""
 _CLAIM_COLS = """id, entity_id, entity_name, property, value, value_norm,
                 polarity, event_time, ingest_time, sources,
                 evidence_signal_ids, corroboration_count, confidence, scope,
@@ -184,7 +192,9 @@ class LeftStore:
                     expires_at    DOUBLE,
                     status        VARCHAR,
                     extract_mode  VARCHAR,
-                    canonical_id  VARCHAR
+                    canonical_id  VARCHAR,
+                    context_id    VARCHAR,
+                    context_parent VARCHAR
                 );
                 CREATE TABLE IF NOT EXISTS claims (
                     id                  VARCHAR PRIMARY KEY,
@@ -223,6 +233,9 @@ class LeftStore:
             self._con.execute("ALTER TABLE signals ADD COLUMN occurred_at DOUBLE")
             self._con.execute("UPDATE signals SET occurred_at = created_at "
                               "WHERE occurred_at IS NULL")
+        for col in ("context_id", "context_parent"):
+            if col not in cols:
+                self._con.execute(f"ALTER TABLE signals ADD COLUMN {col} VARCHAR")
         ccols = {r[1] for r in self._con.execute("PRAGMA table_info('claims')").fetchall()}
         if "value_entity_id" not in ccols:
             self._con.execute("ALTER TABLE claims ADD COLUMN value_entity_id VARCHAR")
@@ -239,20 +252,20 @@ class LeftStore:
                 f"""
                 INSERT INTO signals (id, content, source, scope, metadata, embedding,
                     created_at, occurred_at, expires_at, status, extract_mode,
-                    canonical_id)
-                VALUES (?, ?, ?, ?, ?, ?::FLOAT[{self._dim}], ?, ?, ?, ?, ?, ?)
+                    canonical_id, context_id, context_parent)
+                VALUES (?, ?, ?, ?, ?, ?::FLOAT[{self._dim}], ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [sig.id, sig.content, sig.source, sig.scope, _j(sig.metadata),
                  sig.embedding, sig.created_at, sig.occurred_at, sig.expires_at,
-                 sig.status, sig.extract_mode, sig.canonical_id],
+                 sig.status, sig.extract_mode, sig.canonical_id, sig.context_id,
+                 sig.context_parent],
             )
             return True
 
     def signals_by_status(self, status: str) -> list[Signal]:
         with self._lock:
             rows = self._con.execute(
-                """SELECT id, content, source, scope, metadata, embedding, created_at,
-                          occurred_at, expires_at, status, extract_mode, canonical_id
+                f"""SELECT {_SIGNAL_COLS}
                    FROM signals WHERE status = ? ORDER BY created_at""",
                 [status],
             ).fetchall()
@@ -261,8 +274,7 @@ class LeftStore:
     def signals_with_canonical(self, canonical_id: str) -> list[Signal]:
         with self._lock:
             rows = self._con.execute(
-                """SELECT id, content, source, scope, metadata, embedding, created_at,
-                          occurred_at, expires_at, status, extract_mode, canonical_id
+                f"""SELECT {_SIGNAL_COLS}
                    FROM signals WHERE canonical_id = ?""",
                 [canonical_id],
             ).fetchall()
@@ -380,11 +392,44 @@ class LeftStore:
         placeholders = ",".join("?" for _ in ids)
         with self._lock:
             rows = self._con.execute(
-                f"""SELECT id, content, source, scope, metadata, embedding, created_at,
-                           occurred_at, expires_at, status, extract_mode, canonical_id
+                f"""SELECT {_SIGNAL_COLS}
                     FROM signals WHERE id IN ({placeholders})
                     ORDER BY created_at""", ids).fetchall()
         return [self._row_to_signal(r) for r in rows]
+
+    def signals_in_context(self, *, context_id: str | None = None,
+                           context_parent: str | None = None, before: float,
+                           since: float = 0.0, limit: int = 5) -> list[Signal]:
+        """The latest signals said in one conversation (or around it), before a time.
+        Event time orders them: when it was said, not when it arrived."""
+        col, val = ("context_id", context_id) if context_id else ("context_parent", context_parent)
+        if not val:
+            return []
+        with self._lock:
+            rows = self._con.execute(
+                f"""SELECT {_SIGNAL_COLS} FROM signals
+                    WHERE {col} = ?
+                      AND COALESCE(NULLIF(occurred_at, 0), created_at) < ?
+                      AND COALESCE(NULLIF(occurred_at, 0), created_at) >= ?
+                    ORDER BY COALESCE(NULLIF(occurred_at, 0), created_at) DESC LIMIT ?""",
+                [val, before, since, limit]).fetchall()
+        return list(reversed([self._row_to_signal(r) for r in rows]))
+
+    def similar_signals(self, qvec, *, scope: str | None, top_k: int = 10,
+                        exclude: str | None = None) -> list[tuple[Signal, float]]:
+        """Already-extracted signals most similar to this one (by embedding)."""
+        clauses, params = ["embedding IS NOT NULL", "status = 'extracted'"], []
+        if scope:
+            clauses.append("scope = ?"); params.append(scope)
+        if exclude:
+            clauses.append("id <> ?"); params.append(exclude)
+        with self._lock:
+            rows = self._con.execute(
+                f"""SELECT {_SIGNAL_COLS},
+                           array_cosine_similarity(embedding, ?::FLOAT[{self._dim}]) AS sim
+                    FROM signals WHERE {' AND '.join(clauses)}
+                    ORDER BY sim DESC LIMIT ?""", [qvec, *params, top_k]).fetchall()
+        return [(self._row_to_signal(r[:14]), float(r[14])) for r in rows]
 
     def get_signal(self, signal_id: str) -> Signal | None:
         found = self.signals_by_ids([signal_id])
@@ -445,7 +490,9 @@ class LeftStore:
             id=r[0], content=r[1], source=r[2], scope=r[3], metadata=_u(r[4], {}),
             embedding=list(r[5]) if r[5] is not None else None, created_at=r[6],
             occurred_at=r[7] or 0.0, expires_at=r[8], status=r[9],
-            extract_mode=r[10], canonical_id=r[11])
+            extract_mode=r[10], canonical_id=r[11],
+            context_id=r[12] if len(r) > 12 else None,
+            context_parent=r[13] if len(r) > 13 else None)
 
     @staticmethod
     def _row_to_claim(r) -> Claim:
@@ -517,6 +564,13 @@ class RightStore:
                     value_weights VARCHAR,
                     PRIMARY KEY (etch_id, version)
                 );
+                CREATE TABLE IF NOT EXISTS context_subjects (
+                    context_id    VARCHAR,
+                    entity_id     VARCHAR,
+                    mentions      INTEGER,
+                    last_seen_at  DOUBLE,
+                    PRIMARY KEY (context_id, entity_id)
+                );
                 CREATE TABLE IF NOT EXISTS anon_tokens (
                     entity_id   VARCHAR PRIMARY KEY,
                     token       VARCHAR,
@@ -555,6 +609,38 @@ class RightStore:
             self._con.execute("ALTER TABLE etch_versions ADD COLUMN event_at DOUBLE")
             self._con.execute("UPDATE etch_versions SET event_at = created_at "
                               "WHERE event_at IS NULL")
+
+    # ── conversation focus ──────────────────────────────────────────────────
+
+    def touch_context(self, context_id: str, entity_ids: list[str], at: float) -> None:
+        """These subjects came up in this conversation at this (event) time."""
+        if not context_id or not entity_ids:
+            return
+        with self._lock:
+            for eid in dict.fromkeys(entity_ids):
+                self._con.execute(
+                    """INSERT INTO context_subjects VALUES (?, ?, 1, ?)
+                       ON CONFLICT (context_id, entity_id) DO UPDATE SET
+                         mentions = context_subjects.mentions + 1,
+                         last_seen_at = greatest(context_subjects.last_seen_at, excluded.last_seen_at)""",
+                    [context_id, eid, at])
+
+    def context_focus(self, context_id: str, *, since: float = 0.0, before: float | None = None,
+                      limit: int = 5) -> list[tuple[Entity, int, float]]:
+        """What a conversation has been about: subjects, mentions, last seen —
+        most recent first."""
+        if not context_id:
+            return []
+        upper = "AND c.last_seen_at < ?" if before is not None else ""
+        params = [context_id, since] + ([before] if before is not None else []) + [limit]
+        with self._lock:
+            rows = self._con.execute(
+                f"""SELECT e.id, e.name, e.type, e.aliases, e.scope, e.created_at, e.updated_at,
+                           e.embedding, c.mentions, c.last_seen_at
+                    FROM context_subjects c JOIN entities e ON e.id = c.entity_id
+                    WHERE c.context_id = ? AND c.last_seen_at >= ? {upper}
+                    ORDER BY c.last_seen_at DESC, c.mentions DESC LIMIT ?""", params).fetchall()
+        return [(self._row_to_entity(r[:8]), int(r[8]), float(r[9])) for r in rows]
 
     def etches_referencing(self, entity_id: str) -> list[Etch]:
         """Every belief whose VALUE points at this entity — the reverse edge.

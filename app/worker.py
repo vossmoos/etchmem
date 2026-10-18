@@ -23,8 +23,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 
-from app.agents import (ClaimExtractor, ConflictResolver, ExtractionResult, SignalInput,
-                        SubjectCandidate)
+from app.agents import (ClaimExtractor, ConflictResolver, ConversationView, ExtractionResult,
+                        Resolution, SignalInput, SubjectCandidate)
 from app.anonymize import ANON_ENTITY_LABELS, scrub
 from app.config import settings
 from app.dedup import group_duplicates
@@ -111,6 +111,16 @@ def _with_retry(fn):
     raise last  # type: ignore[misc]
 
 
+def _ago(seconds: float) -> str:
+    """'5 min earlier', '3 h earlier', '2 days earlier'."""
+    seconds = max(0.0, seconds)
+    if seconds < 3600:
+        return f"{max(1, int(seconds // 60))} min earlier"
+    if seconds < 2 * 86400:
+        return f"{int(seconds // 3600)} h earlier"
+    return f"{int(seconds // 86400)} days earlier"
+
+
 def _align_labels(result: ExtractionResult, checks, labels) -> ExtractionResult:
     """Use the existing label the verify step named, when it is one that exists for
     that subject and property; otherwise keep the extracted value."""
@@ -182,84 +192,62 @@ class Pipeline:
         if not eligible_all:
             return
 
-        # ── LLM fan-out: batched prompts, bounded concurrency, retries ─────
-        # Only the network calls run in threads; all DuckDB writes happen
-        # sequentially below (single-writer constraint).
+        # ── LLM fan-out: bounded concurrency, retries ─────────────────────
+        # Signals without a conversation are batched as before. Signals said in a
+        # conversation form one lane per conversation and are read in the order
+        # they were said, each seeing the ones before it. Lanes and batches run in
+        # parallel; all writes happen sequentially below.
         size = max(1, settings.extract_llm_batch_size)
-        by_scope: dict[str, list] = {}
+        loose: dict[str, list] = {}
+        lanes: dict[tuple, list] = {}
         for s in representatives:
-            by_scope.setdefault(s.scope, []).append(s)
-        # One scope per prompt, so each chunk gets its own scope's context.
-        chunks = [group[i:i + size] for group in by_scope.values()
-                  for i in range(0, len(group), size)]
-        chunk_results: list[tuple | None] = [None] * len(chunks)
-
-        # Candidate subjects are read here, before the threads: DuckDB stays
-        # single-threaded and only the model calls fan out.
-        prepared = [[self._candidates(s) for s in chunk] for chunk in chunks]
-
-        def _run_chunk(i):
-            chunk, cands = chunks[i], prepared[i]
-            inputs = [SignalInput(text=s.content, sent_at=s.event_at, source=s.source)
-                      for s in chunk]
-            candidates = [[c for c, _ in per] for per in cands]
-            known = {(c.name, prop): vals for per in cands for c, by_prop in per
-                     for prop, vals in by_prop.items()}
-            resolved = _with_retry(lambda: self._extractor.resolve_subjects(inputs, candidates))
-            if resolved is None:
-                # No resolve step (stubs, simple backends): the candidates are hints.
-                names = list(dict.fromkeys(c.name for per in candidates for c in per))
-                labels = [f"{name} · {prop}: " + ", ".join(vals)
-                          for (name, prop), vals in known.items() if name in names]
+            conv = s.context_parent or s.context_id
+            if conv:
+                lanes.setdefault((s.scope, conv), []).append(s)
             else:
-                # Extraction sees the message and its subjects only. Existing labels
-                # are matched afterwards, by the verify step: shown to the extractor
-                # they get restated instead of the message's own facts.
-                inputs = [replace(inp, subjects=tuple(f"{r.name} ({r.entity_type})" for r in rs))
-                          for inp, rs in zip(inputs, resolved)]
-                names, labels = [], []
-            results = _with_retry(lambda: self._extractor.extract_signals(
-                inputs, names or None, labels or None))
-            checks = None
-            if settings.verify_claims:
-                claim_labels = [[known.get((c.entity_name, c.property), []) for c in r.claims]
-                                for r in results]
-                checks = _with_retry(lambda: self._extractor.verify_claims(
-                    inputs, results, claim_labels))
-                if checks is not None:
-                    results = [_align_labels(r, row, lab)
-                               for r, row, lab in zip(results, checks, claim_labels)]
-            keep = None if checks is None else [[c.supported for c in row] for row in checks]
-            return results, resolved, keep
+                loose.setdefault(s.scope, []).append(s)
+        units: list[tuple[list, bool]] = [
+            (group[i:i + size], False) for group in loose.values()
+            for i in range(0, len(group), size)]
+        units += [(sorted(group, key=lambda x: (x.event_at, x.created_at)), True)
+                  for group in lanes.values()]
+        unit_results: list[list | None] = [None] * len(units)
 
-        if len(chunks) == 1:
+        def _run_unit(i):
+            sigs, conversational = units[i]
+            if not conversational:
+                return self._read(sigs, None, None)
+            out, earlier = [], []
+            for sig in sigs:
+                view, focus = self._conversation(sig, earlier)
+                (row,) = self._read([sig], [view], [focus])
+                out.append(row)
+                earlier.append((sig, row[1]))
+            return out
+
+        if len(units) == 1:
             try:
-                chunk_results[0] = _run_chunk(0)
+                unit_results[0] = _run_unit(0)
             except Exception:
                 log.exception("extraction failed; signals stay 'batched' and retry next tick")
         else:
             with ThreadPoolExecutor(max_workers=max(1, settings.extract_concurrency)) as pool:
-                futures = {pool.submit(_run_chunk, i): i for i in range(len(chunks))}
+                futures = {pool.submit(_run_unit, i): i for i in range(len(units))}
                 for fut in as_completed(futures):
                     i = futures[fut]
                     try:
-                        chunk_results[i] = fut.result()
+                        unit_results[i] = fut.result()
                     except Exception:
-                        log.exception("extraction chunk %d failed; its signals stay "
+                        log.exception("extraction unit %d failed; its signals stay "
                                       "'batched' and retry next tick", i)
 
         now = time.time()
-        reps_with_results = []
-        for chunk, out in zip(chunks, chunk_results):
-            if out is None:
-                continue
-            results, resolved, keep = out
-            for k, (rep, result) in enumerate(zip(chunk, results)):
-                reps_with_results.append(
-                    (rep, result, resolved[k] if resolved is not None else None,
-                     keep[k] if keep is not None else None))
+        reps_with_results = [
+            (rep, *row)
+            for (sigs, _), rows in zip(units, unit_results) if rows is not None
+            for rep, row in zip(sigs, rows)]
 
-        for rep, result, resolved, keep in reps_with_results:
+        for rep, result, resolution, keep, view in reps_with_results:
             members = self._s.left.signals_with_canonical(rep.id)
             sources = sorted({m.source for m in members})
             evidence_ids = sorted({m.id for m in members})
@@ -272,12 +260,18 @@ class Pipeline:
                     summary.claims_unsupported += 1
                     continue
                 kept.append(ec)
-            if resolved is not None:
-                # What the signal was found to be about, and why: part of the record.
-                self._s.left.update_signal_metadata(rep.id, {
-                    **(rep.metadata or {}),
-                    "subjects": [r.model_dump() for r in resolved]})
+            if resolution is not None or view is not None:
+                # What the signal was found to be about, in which conversation, and
+                # what it brought to mind: part of the record.
+                meta = dict(rep.metadata or {})
+                if resolution is not None:
+                    meta["subjects"] = [r.model_dump() for r in resolution.subjects]
+                    meta["associations"] = [a.model_dump() for a in resolution.associations]
+                if view is not None:
+                    meta["focus"] = list(view.focus)
+                self._s.left.update_signal_metadata(rep.id, meta)
 
+            touched: list[str] = []
             claims = self._repair_compound_subjects(rep, kept, summary)
             for ec in claims:
                 subjects = self._subjects_for(ec, rep.scope)
@@ -289,31 +283,142 @@ class Pipeline:
                 for entity in subjects:
                     self._write_claim(ec, entity, rep, sources, evidence_ids,
                                       now, summary)
+                    touched.append(entity.id)
+            if resolution is not None:
+                for r in resolution.subjects:
+                    found = self._entities.find(r.name, r.entity_type)
+                    if found is not None:
+                        touched.append(found.id)
+            for conv in (rep.context_id, rep.context_parent):
+                self._s.right.touch_context(conv, touched, rep.event_at)
 
             self._s.left.set_signal_status([m.id for m in members], S_EXTRACTED)
             summary.extracted_signals += len(members)
 
         summary.entities = self._entities.stats.to_dict()
 
-    def _candidates(self, sig) -> list[tuple[SubjectCandidate, dict[str, list[str]]]]:
-        """Existing subjects most similar to this signal, with what is known
-        about them and their labels (for reusing a label, or retracting it).
+    def _read(self, sigs, views, focus) -> list[tuple]:
+        """Resolve, extract and verify a few signals in one go.
+        Returns per signal: (result, resolution | None, keep | None, view | None)."""
+        cands = [self._candidates(s, focus[k] if focus else []) for k, s in enumerate(sigs)]
+        inputs = [SignalInput(text=s.content, sent_at=s.event_at, source=s.source) for s in sigs]
+        candidates = [[c for c, _ in per] for per in cands]
+        known = {(c.name, prop): vals for per in cands for c, by_prop in per
+                 for prop, vals in by_prop.items()}
+        if views:
+            raw = _with_retry(lambda: self._extractor.resolve_subjects(inputs, candidates, views))
+        else:
+            raw = _with_retry(lambda: self._extractor.resolve_subjects(inputs, candidates))
+        resolved = None if raw is None else [
+            r if isinstance(r, Resolution) else Resolution(subjects=list(r)) for r in raw]
+        if resolved is None:
+            # No resolve step (stubs, simple backends): the candidates are hints.
+            names = list(dict.fromkeys(c.name for per in candidates for c in per))
+            labels = [f"{name} · {prop}: " + ", ".join(vals)
+                      for (name, prop), vals in known.items() if name in names]
+        else:
+            # Extraction sees the message and its subjects only. Existing labels
+            # are matched afterwards, by the verify step: shown to the extractor
+            # they get restated instead of the message's own facts.
+            inputs = [replace(inp, subjects=tuple(f"{r.name} ({r.entity_type})" for r in rs.subjects))
+                      for inp, rs in zip(inputs, resolved)]
+            names, labels = [], []
+        results = _with_retry(lambda: self._extractor.extract_signals(
+            inputs, names or None, labels or None))
+        checks = None
+        if settings.verify_claims:
+            claim_labels = [[known.get((c.entity_name, c.property), []) for c in r.claims]
+                            for r in results]
+            checks = _with_retry(lambda: self._extractor.verify_claims(
+                inputs, results, claim_labels))
+            if checks is not None:
+                results = [_align_labels(r, row, lab)
+                           for r, row, lab in zip(results, checks, claim_labels)]
+        keep = None if checks is None else [[c.supported for c in row] for row in checks]
+        return [(results[k], resolved[k] if resolved is not None else None,
+                 keep[k] if keep is not None else None, views[k] if views else None)
+                for k in range(len(sigs))]
 
-        Similarity only proposes; the resolve step decides whether the signal
-        refers to any of them.
+    def _conversation(self, sig, earlier) -> tuple[ConversationView, list]:
+        """What the conversation this signal was said in has been about, and its
+        last messages, as of when it was said. `earlier`: (signal, resolution) read
+        just before it in the same lane, not yet written.
+
+        Returns the view and the focus subjects as Entities (or (name, type) for
+        subjects only this lane has seen so far).
+        """
+        window = max(0.0, settings.context_window_seconds)
+        at = sig.event_at
+        left, right = self._s.left, self._s.right
+        recent = left.signals_in_context(context_id=sig.context_id, before=at, limit=4) \
+            if sig.context_id else []
+        if sig.context_parent:
+            # The last messages around the thread, however old: how long ago they were
+            # said is shown, and the model judges whether they still matter.
+            ids = {x.id for x in recent}
+            around = [x for x in left.signals_in_context(
+                context_parent=sig.context_parent, before=at, limit=3)
+                if x.id not in ids]
+            recent = sorted(recent + around, key=lambda x: x.event_at)
+        focus: list = []
+        seen: set = set()
+        for prev, res in reversed(earlier):          # newest first
+            same = (sig.context_id and prev.context_id == sig.context_id) or (
+                sig.context_parent and prev.context_parent == sig.context_parent
+                and at - prev.event_at <= window)
+            if not same or res is None:
+                continue
+            for r in res.subjects:
+                ent = self._entities.find(r.name, r.entity_type)
+                key = ent.id if ent else (r.name, r.entity_type)
+                if key not in seen:
+                    seen.add(key)
+                    focus.append(ent or (r.name, r.entity_type))
+        for conv, since in ((sig.context_id, 0.0), (sig.context_parent, at - window)):
+            for ent, _n, _last in right.context_focus(conv, since=since, before=at):
+                if ent.id not in seen:
+                    seen.add(ent.id)
+                    focus.append(ent)
+        focus = focus[:5]
+        names = tuple(f"{f.name} ({f.type})" if hasattr(f, "id") else f"{f[0]} ({f[1]})"
+                      for f in focus)
+        lines = tuple(f"[{_ago(at - x.event_at)}] " + x.content.replace("\n", " ")[:300]
+                      for x in recent[-5:])
+        return ConversationView(focus=names, recent=lines), focus
+
+    def _candidates(self, sig, focus=()) -> list[tuple[SubjectCandidate, dict[str, list[str]]]]:
+        """Subjects offered to the resolve step, with what is known about them and
+        their labels (for reusing a label, or retracting it):
+
+          focus    what the signal's conversation has been about
+          linked   tied to a focus subject by a declared relation, either way
+                   (the ticket that tracks a feature)
+          similar  beliefs and names that look like the signal (embedding search)
+
+        Nothing here decides; the resolve step reads the signal and chooses.
         """
         n = max(0, settings.subject_candidates)
-        if n == 0 or not sig.embedding:
+        if n == 0:
             return []
+        right = self._s.right
         label_props = set(settings.multi_value_set) | {
             name for name, spec in self._registry.by_name.items() if spec.detail}
         per_label = max(0, settings.extract_known_labels)
         out: list[tuple[SubjectCandidate, dict[str, list[str]]]] = []
-        for ent, _sim in self._s.right.search_entities(sig.embedding, top_k=n * 4):
-            if ent.scope != sig.scope or self._registry.is_ignored(ent.type):
-                continue
-            etches = self._s.right.etches_for_entity(ent.id)
-            facts = tuple(f"{e.property}: {e.current_value[:80]}" for e in etches[:6])
+        seen: set = set()
+
+        def add(ent, role) -> None:
+            if ent is None or ent.id in seen or self._registry.is_ignored(ent.type):
+                return
+            if ent.scope != sig.scope:
+                return
+            seen.add(ent.id)
+            etches = right.etches_for_entity(ent.id)
+            # What identifies the work first: its title, then what it is about.
+            first = ["title", "decision_state", "work_state", "tracked_in"] + sorted(label_props)
+            ranked = sorted(etches, key=lambda e: first.index(e.property)
+                            if e.property in first else len(first))
+            facts = tuple(f"{e.property}: {e.current_value[:80]}" for e in ranked[:6])
             labels: dict[str, list[str]] = {}
             for e in etches:
                 if e.property not in label_props or per_label == 0:
@@ -322,9 +427,38 @@ class Pipeline:
                     [x.strip() for x in (e.current_value or "").split(",") if x.strip()]
                 if vals:
                     labels[e.property] = vals[:per_label]
-            out.append((SubjectCandidate(ent.name, ent.type, facts), labels))
-            if len(out) >= n:
-                break
+            out.append((SubjectCandidate(ent.name, ent.type, facts, role), labels))
+
+        focus_entities = [f for f in focus if hasattr(f, "id")]
+        for f in focus:
+            if hasattr(f, "id"):
+                add(f, "focus")
+            elif (f[0], f[1]) not in seen:
+                seen.add((f[0], f[1]))
+                out.append((SubjectCandidate(f[0], f[1], (), "focus"), {}))
+        for ent in focus_entities:
+            for e in right.etches_for_entity(ent.id):
+                if e.value_entity_id:
+                    add(right.get_entity(e.value_entity_id), "linked")
+            for e in right.etches_referencing(ent.id):
+                add(right.get_entity(e.entity_id), "linked")
+        fixed = len(out)
+        if sig.embedding:
+            # Earlier messages like this one, and what they turned out to be about.
+            for other, _sim in self._s.left.similar_signals(sig.embedding, scope=sig.scope,
+                                                            top_k=n, exclude=sig.id):
+                for c in self._s.left.claims_for_signal(other.id):
+                    if len(out) - fixed >= n:
+                        break
+                    add(right.get_entity(c.entity_id), "similar")
+            for hit in right.search_etches(sig.embedding, top_k=n * 3, scope=sig.scope):
+                if len(out) - fixed >= n:
+                    break
+                add(right.get_entity(hit.row.get("entity_id")), "similar")
+            for ent, _sim in right.search_entities(sig.embedding, top_k=n * 4):
+                if len(out) - fixed >= n:
+                    break
+                add(ent, "similar")
         return out
 
     def _compound(self, ec) -> bool:

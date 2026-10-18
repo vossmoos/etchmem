@@ -26,6 +26,12 @@ class RememberRequest(BaseModel):
                     "today's date and the recency policy cannot order them.",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
+    context: str | None = Field(
+        None, description="The conversation it was said in, as you address it: a "
+                          "Slack thread, a ticket's comments, a meeting. Read with its "
+                          "earlier messages; same words in another context = another signal.")
+    context_parent: str | None = Field(
+        None, description="The conversation around it, e.g. the channel of a thread.")
 
 
 class RememberResponse(BaseModel):
@@ -320,11 +326,40 @@ class SignalRecordResponse(BaseModel):
     scope: str
     status: str = Field(..., description="new | batched | extracted")
     canonical_id: str | None = Field(None, description="The duplicate cluster's representative.")
+    context: str | None = None
+    context_parent: str | None = None
     metadata: dict = Field(default_factory=dict,
-                           description="As deposited, plus `subjects` once resolved.")
+                           description="As deposited, plus once resolved: `subjects` (what it "
+                                       "is about), `associations` (related knowledge it "
+                                       "brought to mind, not claims) and `focus` (what its "
+                                       "conversation was about when it was said).")
     created_at: float = 0.0
     occurred_at: float = 0.0
     claims: list[ClaimOut] = Field(default_factory=list)
+
+
+class ContextSubjectOut(BaseModel):
+    entity_id: str
+    name: str
+    entity_type: str
+    mentions: int
+    last_seen_at: float
+
+
+class ContextSignalOut(BaseModel):
+    id: str
+    content: str | None = None
+    source: str
+    status: str
+    context: str | None = None
+    occurred_at: float = 0.0
+
+
+class ContextResponse(BaseModel):
+    """One conversation: what it has been about, and its signals in order."""
+    id: str
+    focus: list[ContextSubjectOut] = Field(default_factory=list)
+    signals: list[ContextSignalOut] = Field(default_factory=list)
 
 
 class DossierResponse(BaseModel):

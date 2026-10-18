@@ -22,7 +22,8 @@ from app.hashing import content_hash
 from app.schemas import (
     AssociateNode, AssociateResponse, ClaimOut, DossierResponse, EdgeOut,
     EtchListResponse, KnowledgeResponse, EntityOut, EtchOut, ListedEtchOut, RecallResult,
-    SignalOut, SignalRecordResponse, VersionOut,
+    ContextResponse, ContextSignalOut, ContextSubjectOut, SignalOut, SignalRecordResponse,
+    VersionOut,
 )
 from app.stores import S_BATCHED, S_EXTRACTED, S_NEW, Signal, Stores
 from app.worker import Pipeline
@@ -77,7 +78,7 @@ class MemoryService:
     # ── remember ────────────────────────────────────────────────────────────
 
     def remember(self, data, source, scope, extract_mode="deferred",
-                 metadata=None, occurred_at=None):
+                 metadata=None, occurred_at=None, context=None, context_parent=None):
         """Deposit a raw signal.
 
         `occurred_at` declares when the content actually happened (ISO-8601 or
@@ -86,10 +87,14 @@ class MemoryService:
         collapses the gate's recency policy — a 2009 answer then competes with
         a 2022 answer as an equal.
 
+        `context` / `context_parent` say where it was said (a thread and its
+        channel, a ticket's comments, a meeting), as the client addresses it. The
+        same words said in another conversation are another signal.
+
         Returns (signal_id, stored, occurred_at) where occurred_at is 0.0 when
         nothing parseable was declared.
         """
-        sig_id = content_hash(data)
+        sig_id = content_hash(data if not context else f"{context}\n{data}")
         now = time.time()
         ttl = settings.signal_ttl_seconds
         declared = parse_timestamp(occurred_at) or 0.0
@@ -99,6 +104,7 @@ class MemoryService:
             created_at=now, occurred_at=declared,
             expires_at=(now + ttl if ttl > 0 else 0.0),
             status=S_NEW, extract_mode=extract_mode, canonical_id=None,
+            context_id=context or None, context_parent=context_parent or None,
         )
         stored = self.stores.left.add_signal(sig)
         return sig_id, stored, declared
@@ -436,8 +442,27 @@ class MemoryService:
         return SignalRecordResponse(
             id=sig.id, content=None if hidden else sig.content, source=sig.source,
             scope=sig.scope, status=sig.status, canonical_id=sig.canonical_id,
+            context=sig.context_id, context_parent=sig.context_parent,
             metadata=sig.metadata or {}, created_at=sig.created_at,
             occurred_at=sig.event_at, claims=claims)
+
+    def context(self, context_id: str, *, limit: int = 50) -> ContextResponse:
+        """One conversation as recorded: what it has been about (focus, most recent
+        first) and its signals in the order they were said."""
+        focus = [ContextSubjectOut(entity_id=e.id, name=e.name, entity_type=e.type,
+                                   mentions=n, last_seen_at=last)
+                 for e, n, last in self.stores.right.context_focus(context_id, limit=20)]
+        hidden = settings.claims_anonymization
+        sigs = self.stores.left.signals_in_context(context_id=context_id, before=float("inf"),
+                                                   limit=limit)
+        if not sigs:
+            sigs = self.stores.left.signals_in_context(context_parent=context_id,
+                                                       before=float("inf"), limit=limit)
+        signals = [ContextSignalOut(id=s.id, content=None if hidden else s.content,
+                                    source=s.source, status=s.status, context=s.context_id,
+                                    occurred_at=s.event_at)
+                   for s in sigs]
+        return ContextResponse(id=context_id, focus=focus, signals=signals)
 
     # ── stats ────────────────────────────────────────────────────────────────
 

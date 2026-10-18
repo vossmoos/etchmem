@@ -130,6 +130,14 @@ class EntityResolver:
         self._store.upsert_entity(entity)
         return entity
 
+    def find(self, name: str, entity_type: str) -> Entity | None:
+        """An existing entity for this name, by key or alias; never creates one.
+        For bookkeeping (what a conversation was about), not for attaching facts."""
+        if self._registry.is_ignored(entity_type):
+            return None
+        key, _ = self._registry.canonical_key_detail(entity_type, name)
+        return self._store.find_entity_by_alias(key or normalize_entity_name(name, entity_type))
+
     def resolve_key(self, key: str, entity_type: str, scope: str | None) -> Entity | None:
         """Resolve a subject from an already-extracted identifier key.
 

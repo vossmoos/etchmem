@@ -28,7 +28,7 @@ from fastapi import FastAPI, HTTPException, Query
 from app import __version__
 from app.config import settings
 from app.schemas import (
-    DossierResponse, SignalRecordResponse, EtchListResponse, ExportResponse, HealthResponse, HistoryResponse, RecallRequest,
+    ContextResponse, DossierResponse, SignalRecordResponse, EtchListResponse, ExportResponse, HealthResponse, HistoryResponse, RecallRequest,
     RecallResponse, RememberRequest, RememberResponse, SleepResponse, StatsResponse,
     VersionOut,
     KnowledgeResponse,
@@ -77,7 +77,7 @@ def remember(req: RememberRequest) -> RememberResponse:
     sig_id, stored, occurred_at = get_service().remember(
         data=req.data, source=req.source, scope=req.scope,
         extract_mode=req.extract_mode, metadata=req.metadata,
-        occurred_at=req.occurred_at)
+        occurred_at=req.occurred_at, context=req.context, context_parent=req.context_parent)
     return RememberResponse(
         id=sig_id, stored=stored, status="new" if stored else "duplicate",
         message="Accepted." if stored else "Already present (idempotent).",
@@ -171,6 +171,11 @@ def signal(signal_id: str) -> SignalRecordResponse:
     if s is None:
         raise HTTPException(status_code=404, detail=f"Unknown signal: {signal_id}")
     return s
+
+
+@app.get("/context/{context_id:path}", response_model=ContextResponse)
+def context(context_id: str) -> ContextResponse:
+    return get_service().context(context_id)
 
 
 @app.get("/stats", response_model=StatsResponse)

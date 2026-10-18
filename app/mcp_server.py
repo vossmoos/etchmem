@@ -17,6 +17,7 @@ Tools:
   etch_history  — version timeline of one etch
   dossier       — full provenance of one etch: versions, claims, raw signals
   signal        — one signal: its status, what it is about, the claims from it
+  context       — one conversation: what it has been about, its signals in order
 """
 from __future__ import annotations
 
@@ -61,16 +62,22 @@ def remember(
     extract_mode: Literal["immediate", "deferred"] = "deferred",
     metadata: dict[str, Any] | None = None,
     occurred_at: str | float | None = None,
+    context: str | None = None,
+    context_parent: str | None = None,
 ) -> dict[str, Any]:
     """Deposit a raw signal (call note, tool output, email, decision...).
     `source` = who produced it (e.g. 'agent-33'); `scope` = domain tag
     (e.g. 'sales'). 'immediate' extract_mode skips batching for urgent facts.
     `occurred_at` = when the fact actually happened (ISO-8601 or epoch
     seconds), defaulting to now — always set it for historical records, or
-    they all arrive dated today and cannot be ordered against each other."""
+    they all arrive dated today and cannot be ordered against each other.
+    `context` = the conversation it was said in (a thread, a ticket's comments, a
+    meeting) and `context_parent` the one around it (the channel): it is then read
+    with what that conversation has been about."""
     sig_id, stored, parsed = _svc().remember(
         data=data, source=source, scope=scope,
-        extract_mode=extract_mode, metadata=metadata, occurred_at=occurred_at)
+        extract_mode=extract_mode, metadata=metadata, occurred_at=occurred_at,
+        context=context, context_parent=context_parent)
     return {"id": sig_id, "stored": stored,
             "status": "new" if stored else "duplicate",
             "occurred_at": parsed, "occurred_at_declared": bool(parsed)}
@@ -217,3 +224,11 @@ def signal(signal_id: str) -> dict[str, Any]:
     if s is None:
         return {"error": f"unknown signal {signal_id!r}"}
     return s.model_dump()
+
+
+@mcp.tool()
+def context(context_id: str) -> dict[str, Any]:
+    """One conversation as recorded (the id you passed as `context` or
+    `context_parent`): what it has been about (`focus`, most recent first) and its
+    signals in the order they were said."""
+    return _svc().context(context_id).model_dump()

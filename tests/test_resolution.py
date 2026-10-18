@@ -14,8 +14,9 @@ import textwrap
 import pytest
 
 from app import config as _cfg
-from app.agents import (ClaimCheck, ClaimExtractor, ConflictResolution, ConflictResolver,
-                        ExtractedClaim, ExtractionResult, ResolvedSubject)
+from app.agents import (AssociatedSubject, ClaimCheck, ClaimExtractor, ConflictResolution,
+                        ConflictResolver, ExtractedClaim, ExtractionResult, Resolution,
+                        ResolvedSubject)
 from app.embeddings import FakeEmbedding
 from app.service import MemoryService
 
@@ -36,14 +37,16 @@ class Scripted(ClaimExtractor):
         self.subjects: dict[str, list[ResolvedSubject]] = {}
         self.unsupported: set[tuple[str, str]] = set()      # (text, entity)
         self.same_as: dict[tuple[str, str], str] = {}       # (text, value) -> label
+        self.associations: dict[str, list[AssociatedSubject]] = {}
         self.resolve_calls, self.extract_calls, self.verify_calls = [], [], []
 
     def extract(self, text, known_entities=None):
         raise AssertionError("pipeline must call extract_signals")
 
-    def resolve_subjects(self, signals, candidates):
-        self.resolve_calls.append((signals, candidates))
-        return [self.subjects.get(s.text, []) for s in signals]
+    def resolve_subjects(self, signals, candidates, conversations=None):
+        self.resolve_calls.append((signals, candidates, conversations))
+        return [Resolution(self.subjects.get(s.text, []), self.associations.get(s.text, []))
+                for s in signals]
 
     def extract_signals(self, signals, known_entities=None, known_labels=None):
         self.extract_calls.append((signals, known_entities, known_labels))
@@ -72,7 +75,12 @@ def svc(tmp_path, monkeypatch):
         domain: t
         entities:
           - type: feature
+          - type: ticket
         properties:
+          - name: tracked_in
+            relation: ticket
+          - name: work_state
+            values: [todo, done]
           - name: idea
             detail: true
           - name: decision_state
@@ -81,7 +89,8 @@ def svc(tmp_path, monkeypatch):
     for name, value in {"data_dir": str(tmp_path / "data"), "ext_dir": str(ext),
                         "multi_value_properties": "idea", "extract_min_batch": 1,
                         "subject_candidates": 8, "extract_known_labels": 10,
-                        "verify_claims": True, "claims_anonymization": False}.items():
+                        "verify_claims": True, "claims_anonymization": False,
+                        "context_window_seconds": 7200.0}.items():
         monkeypatch.setattr(S, name, value)
     ext_ = Scripted()
     service = MemoryService(embedder=FakeEmbedding(), extractor=ext_, resolver=Res())
@@ -107,7 +116,7 @@ def test_extraction_sees_only_the_resolved_subjects_verify_sees_labels(svc):
     svc.ext.subjects[second] = [subject("followup-3", True)]
     svc.remember(second, "slack", "t")
     svc.sleep()
-    signals, cands = svc.ext.resolve_calls[1]
+    signals, cands, _ = svc.ext.resolve_calls[1]
     assert [c.name for c in cands[0]] == ["followup-3"]   # offered as a candidate
     assert any("idea: links in emails" in f for f in cands[0][0].facts)
     signals, names, labels = svc.ext.extract_calls[1]
@@ -177,3 +186,93 @@ def test_signal_record_before_extraction_and_unknown_id(svc):
     assert record.status == "new" and record.claims == []
     assert record.metadata == {"channel": "C1", "ts": "1.0"}
     assert svc.signal("nope") is None
+
+
+# ── conversations ──────────────────────────────────────────────────────────
+
+T = 1_800_000_000.0
+
+
+def said(svc, text, at, thread, channel="slack:C1"):
+    sig_id, stored, _ = svc.remember(text, "slack", "t", occurred_at=at,
+                                     context=f"{channel}:{thread}", context_parent=channel)
+    assert stored
+    return sig_id
+
+
+def test_a_reply_is_read_in_its_thread_with_the_ticket_its_focus_is_tracked_in(svc):
+    # memory already knows: followup-3 is tracked in LIFT-38
+    link = "followup-3|tracked_in|LIFT-38"
+    svc.ext.subjects[link] = [subject("followup-3", False)]
+    svc.remember(link, "mossy", "t")
+    svc.sleep()
+
+    first = "followup-3|requirement|landing link"
+    svc.ext.subjects[first] = [subject("followup-3", True)]
+    said(svc, first, T, "100.0")
+    svc.sleep()
+
+    reply = "LIFT-38|work_state|done"
+    svc.ext.subjects[reply] = [ResolvedSubject(name="LIFT-38", entity_type="ticket", existing=True,
+                                               quote="this ticket", reason="the thread's ticket",
+                                               in_focus=True)]
+    svc.ext.associations[reply] = [AssociatedSubject(name="LIFT-22", entity_type="ticket",
+                                                     reason="earlier followup work, done")]
+    reply_id = said(svc, reply, T + 60, "100.0")
+    svc.sleep()
+
+    signals, cands, convs = svc.ext.resolve_calls[-1]
+    roles = {c.name: c.role for c in cands[0]}
+    assert roles["followup-3"] == "focus" and roles["LIFT-38"] == "linked"
+    assert convs[0].focus == ("followup-3 (feature)",)
+    assert convs[0].recent == ("[1 min earlier] followup-3|requirement|landing link",)
+
+    record = svc.signal(reply_id)
+    assert record.context == "slack:C1:100.0" and record.context_parent == "slack:C1"
+    assert record.metadata["focus"] == ["followup-3 (feature)"]
+    assert record.metadata["associations"][0]["name"] == "LIFT-22"
+    assert [(c.entity_name, c.property) for c in record.claims] == [("LIFT-38", "work_state")]
+    assert svc.know("LIFT-22") is None                     # recalled, never a claim
+
+    ctx = svc.context("slack:C1:100.0")
+    assert [f.name for f in ctx.focus] == ["LIFT-38", "followup-3"]
+    assert [x.id for x in ctx.signals][-1] == reply_id
+
+
+def test_a_new_message_in_the_channel_sees_its_recent_focus_within_the_window(svc):
+    first = "followup-3|idea|links"
+    svc.ext.subjects[first] = [subject("followup-3", False)]
+    said(svc, first, T, "200.0")
+    svc.sleep()
+    near = "followup-3|idea|more links"
+    svc.ext.subjects[near] = [subject("followup-3", True)]
+    said(svc, near, T + 600, "201.0")                   # a new thread, 10 minutes later
+    far = "followup-3|idea|even more"
+    svc.ext.subjects[far] = []
+    said(svc, far, T + 6 * 3600, "202.0")               # hours later
+    svc.sleep()
+    by_text = {sigs[0].text: convs[0] for sigs, _, convs in svc.ext.resolve_calls if convs}
+    assert by_text[near].focus == ("followup-3 (feature)",)
+    assert by_text[far].focus == ()                     # focus carries over only nearby
+    assert by_text[far].recent[-1].startswith("[5 h earlier] ")   # but it is still shown
+
+
+def test_signals_of_one_conversation_are_read_in_order_in_one_tick(svc):
+    a, b = "followup-3|idea|a", "followup-3|idea|b"
+    svc.ext.subjects[a] = [subject("followup-3", False)]
+    svc.ext.subjects[b] = [subject("followup-3", True)]
+    said(svc, b, T + 30, "300.0")                       # deposited first, said second
+    said(svc, a, T, "300.0")
+    svc.sleep()
+    order = [sigs[0].text for sigs, _, _ in svc.ext.resolve_calls]
+    assert order == [a, b]
+    conv_b = svc.ext.resolve_calls[1][2][0]
+    assert conv_b.focus == ("followup-3 (feature)",)   # seen in this tick, not yet written
+
+
+def test_same_words_in_another_conversation_are_another_signal(svc):
+    one = said(svc, "anything|idea|done", T, "400.0")
+    two = said(svc, "anything|idea|done", T, "401.0")
+    assert one != two
+    sig_id, stored, _ = svc.remember("anything|idea|done", "slack", "t")
+    assert stored and sig_id not in (one, two)           # no context: the old identity

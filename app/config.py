@@ -104,7 +104,12 @@ class Settings(BaseSettings):
     # names and labels without being steered towards unrelated subjects.
     # `verify_claims`: a model checks every extracted claim against its signal
     # and drops the ones the signal does not support. Empty model = claim_model.
-    subject_candidates: int = 8
+    subject_candidates: int = 10
+    # Conversations: a signal's context_id (a thread) and context_parent (the channel)
+    # come from the client. The resolve step reads the signal in its conversation:
+    # its focus so far and its last messages. Around the thread, only messages of
+    # the parent within this window count.
+    context_window_seconds: float = 7200.0
     extract_known_labels: int = 10             # labels per (subject, property)
     resolve_model: str = ""
     verify_claims: bool = True
@@ -198,6 +203,7 @@ _ENV_ALIASES = {
     "agreement_half_life_days": "ETCHMEM_AGREEMENT_HALF_LIFE_DAYS",
     "trust_same_odds_ratio": "ETCHMEM_TRUST_SAME_ODDS_RATIO",
     "subject_candidates": "ETCHMEM_SUBJECT_CANDIDATES",
+    "context_window_seconds": "ETCHMEM_CONTEXT_WINDOW_SECONDS",
     "extract_known_labels": "ETCHMEM_EXTRACT_KNOWN_LABELS",
     "resolve_model": "ETCHMEM_RESOLVE_MODEL",
     "verify_claims": "ETCHMEM_VERIFY_CLAIMS",
