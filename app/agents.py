@@ -25,6 +25,13 @@ if TYPE_CHECKING:
     from app.ext import ExtRegistry
 
 
+def model_settings() -> dict | None:
+    """Per-request settings for every model call: a request timeout, so a hung call
+    fails fast and is retried instead of waiting for the HTTP client's default."""
+    timeout = settings.llm_timeout_seconds
+    return {"timeout": float(timeout)} if timeout and timeout > 0 else None
+
+
 # ── Stage 2: claim extraction ────────────────────────────────────────────────
 
 class ExtractedClaim(BaseModel):
@@ -436,22 +443,26 @@ class PydanticAIClaimExtractor(ClaimExtractor):
             model or settings.claim_model,
             output_type=ExtractionResult,
             system_prompt=_CLAIM_SYSTEM + self._registry.prompt_block() + anon,
+            model_settings=model_settings(),
         )
         self._batch_agent = Agent(
             model or settings.claim_model,
             output_type=BatchExtractionResult,
             system_prompt=_CLAIM_SYSTEM + self._registry.prompt_block()
                           + _CLAIM_BATCH_SUFFIX + anon,
+            model_settings=model_settings(),
         )
         self._resolve_agent = Agent(
             settings.resolve_model or model or settings.claim_model,
             output_type=BatchResolution,
             system_prompt=_RESOLVE_SYSTEM_SUBJECTS + self._registry.prompt_block(),
+            model_settings=model_settings(),
         )
         self._verify_agent = Agent(
             settings.verify_model or model or settings.claim_model,
             output_type=BatchVerification,
             system_prompt=_VERIFY_SYSTEM,
+            model_settings=model_settings(),
         )
 
     def resolve_subjects(
@@ -637,6 +648,7 @@ class PydanticAIConflictResolver(ConflictResolver):
             model or settings.etch_model,
             output_type=ConflictResolution,
             system_prompt=_RESOLVE_SYSTEM + anon,
+            model_settings=model_settings(),
         )
 
     def resolve(self, entity_name: str, prop: str, claims: list[CompetingClaim]) -> ConflictResolution:

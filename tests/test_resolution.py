@@ -295,3 +295,11 @@ def test_messages_read_in_one_tick_see_what_the_earlier_ones_recorded(svc):
     svc.sleep()                                   # both in one tick, not yet written
     conv = svc.ext.resolve_calls[-1][2][0]
     assert conv.recent == ("[1 min earlier] followup-3|idea|a (recorded: followup-3 · idea = a)",)
+
+
+def test_every_model_request_carries_the_timeout(monkeypatch):
+    from app import agents
+    monkeypatch.setattr(S, "llm_timeout_seconds", 60.0)
+    assert agents.model_settings() == {"timeout": 60.0}
+    monkeypatch.setattr(S, "llm_timeout_seconds", 0)
+    assert agents.model_settings() is None              # 0 = client default

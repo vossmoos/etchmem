@@ -155,6 +155,10 @@ class Settings(BaseSettings):
     extract_llm_batch_size: int = 6             # signals per extraction LLM call
     extract_concurrency: int = 4                # parallel extraction LLM calls
     llm_max_retries: int = 4                    # backoff retries on 429/transient
+    # Seconds one model request may take before it is abandoned and retried. A normal
+    # call takes seconds; a hung one otherwise waits for the HTTP client's default
+    # (minutes) and stalls the worker. 0 = no limit beyond the client's default.
+    llm_timeout_seconds: float = 60.0
 
     # ── Signal TTL ─────────────────────────────────────────────────────────
     signal_ttl_seconds: int = 0                 # 0 = never expire
@@ -217,6 +221,7 @@ _ENV_ALIASES = {
     "extract_llm_batch_size": "ETCHMEM_EXTRACT_LLM_BATCH_SIZE",
     "extract_concurrency": "ETCHMEM_EXTRACT_CONCURRENCY",
     "llm_max_retries": "ETCHMEM_LLM_MAX_RETRIES",
+    "llm_timeout_seconds": "ETCHMEM_LLM_TIMEOUT_SECONDS",
     "signal_ttl_seconds": "ETCHMEM_SIGNAL_TTL_SECONDS",
     "host": "ETCHMEM_HOST",
     "port": "ETCHMEM_PORT",
