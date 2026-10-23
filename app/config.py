@@ -159,6 +159,12 @@ class Settings(BaseSettings):
     # call takes seconds; a hung one otherwise waits for the HTTP client's default
     # (minutes) and stalls the worker. 0 = no limit beyond the client's default.
     llm_timeout_seconds: float = 60.0
+    # OpenAI-compatible gateways sometimes add a chat ``metadata`` object the OpenAI
+    # SDK rejects (values must be strings; a list fails the whole reply). When true,
+    # every ``openai:`` model drops a metadata object that is not a string map, and
+    # leaves a real one alone. One switch for resolve, extract, etch and verify.
+    # Other providers are unchanged. Off keeps Pydantic AI's own client.
+    relax_chat_metadata: bool = False
 
     # ── Signal TTL ─────────────────────────────────────────────────────────
     signal_ttl_seconds: int = 0                 # 0 = never expire
@@ -222,6 +228,7 @@ _ENV_ALIASES = {
     "extract_concurrency": "ETCHMEM_EXTRACT_CONCURRENCY",
     "llm_max_retries": "ETCHMEM_LLM_MAX_RETRIES",
     "llm_timeout_seconds": "ETCHMEM_LLM_TIMEOUT_SECONDS",
+    "relax_chat_metadata": "ETCHMEM_RELAX_CHAT_METADATA",
     "signal_ttl_seconds": "ETCHMEM_SIGNAL_TTL_SECONDS",
     "host": "ETCHMEM_HOST",
     "port": "ETCHMEM_PORT",

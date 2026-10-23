@@ -671,6 +671,10 @@ uvicorn app.main:app --reload
 Via environment / `.env` (see `.env.example`). Highlights:
 
 - `ETCHMEM_CLAIM_MODEL` / `ETCHMEM_ETCH_MODEL` — cascade model strings.
+- `ETCHMEM_RELAX_CHAT_METADATA` (false) — for an OpenAI-compatible gateway whose
+  chat replies add a `metadata` object the SDK rejects (values must be strings).
+  One switch wraps every `openai:` model; a real string map is kept. Point
+  `OPENAI_BASE_URL` at the gateway. Other providers are unchanged.
 - `EMBEDDING_PROVIDER` — `openai` (default), `local` (fastembed/ONNX; needs
   `requirements-local.txt`), or `fake` (tests).
 - `LOCAL_EMBEDDING_MODEL` — default

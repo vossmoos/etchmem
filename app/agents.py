@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.anonymize import EXTRACT_ANON_BLOCK, RESOLVE_ANON_BLOCK
 from app.config import settings
+from app.llm import model_for
 
 if TYPE_CHECKING:
     from app.ext import ExtRegistry
@@ -440,26 +441,26 @@ class PydanticAIClaimExtractor(ClaimExtractor):
         self._registry = registry if registry is not None else load_extensions()
         anon = EXTRACT_ANON_BLOCK if settings.claims_anonymization else ""
         self._agent = Agent(
-            model or settings.claim_model,
+            model_for(model or settings.claim_model),
             output_type=ExtractionResult,
             system_prompt=_CLAIM_SYSTEM + self._registry.prompt_block() + anon,
             model_settings=model_settings(),
         )
         self._batch_agent = Agent(
-            model or settings.claim_model,
+            model_for(model or settings.claim_model),
             output_type=BatchExtractionResult,
             system_prompt=_CLAIM_SYSTEM + self._registry.prompt_block()
                           + _CLAIM_BATCH_SUFFIX + anon,
             model_settings=model_settings(),
         )
         self._resolve_agent = Agent(
-            settings.resolve_model or model or settings.claim_model,
+            model_for(settings.resolve_model or model or settings.claim_model),
             output_type=BatchResolution,
             system_prompt=_RESOLVE_SYSTEM_SUBJECTS + self._registry.prompt_block(),
             model_settings=model_settings(),
         )
         self._verify_agent = Agent(
-            settings.verify_model or model or settings.claim_model,
+            model_for(settings.verify_model or model or settings.claim_model),
             output_type=BatchVerification,
             system_prompt=_VERIFY_SYSTEM,
             model_settings=model_settings(),
@@ -645,7 +646,7 @@ class PydanticAIConflictResolver(ConflictResolver):
 
         anon = RESOLVE_ANON_BLOCK if settings.claims_anonymization else ""
         self._agent = Agent(
-            model or settings.etch_model,
+            model_for(model or settings.etch_model),
             output_type=ConflictResolution,
             system_prompt=_RESOLVE_SYSTEM + anon,
             model_settings=model_settings(),
