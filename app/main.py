@@ -122,7 +122,7 @@ def remember(req: RememberRequest) -> RememberResponse:
         data=req.data, source=req.source, scope=req.scope,
         extract_mode=req.extract_mode, metadata=req.metadata,
         occurred_at=req.occurred_at, context=req.context, context_parent=req.context_parent,
-        source_record_id=req.source_record_id, actor=req.actor, taints=req.taints)
+        source_record_id=req.source_record_id, actor=req.actor)
     if stored:
         status, message = "new", "Accepted."
     elif svc.was_erased(sig_id):

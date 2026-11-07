@@ -296,8 +296,7 @@ agent reads many beliefs at once.
 
 With `as_of`, the quote is the newest signal known at that time. With claims
 anonymization on, `excerpt` and `actor` are always left out: raw signals keep
-personal data. A quote's signal is one of the belief's own, so its taints are
-already among the belief's `taints`. The dossier still returns every signal in full.
+personal data. The dossier still returns every signal in full.
 
 ## Ingesting a historical archive
 
@@ -656,21 +655,31 @@ GET  /v1/entity/Acme/etches?writers=mossy&writers=zendesk
 GET  /v1/etch/company_acme::tier/dossier?writers=mossy        # 404 if not readable
 ```
 
-A belief built partly from a writer the reader may not see is not shown at all.
-Without `writers` there is no filter. etchmem never decides who may read what: a
-gateway such as Myco sets `writers` from the caller's permissions
+- A belief **all** of whose writers are on the list is returned in full.
+- A belief that other writers also contributed to is returned only if a listed writer
+  itself states its current value, and then **reduced** to that: the value, the listed
+  writers as `source`, and a quote from their own signals, without the wording, evidence,
+  other values or names the other writers added. Two agents shown the same ticket each
+  see it; a fact only another writer's notes support stays hidden.
+- `dossier` and `history` need every writer on the list.
+
+Without `writers` there is no filter. etchmem does not control access: it applies the list it
+is given. A gateway such as Myco decides that list from the caller's permissions
 (`memory:<writer>:read`), and stamps the calling agent as the writer of what it deposits.
 
 ## Provenance on every signal
+
+A signal's identity is its writer plus its text: the same words from the same writer
+again are a duplicate, while the same words from two writers (two agents shown the same
+ticket) are two signals, one in each writer's memory. Ids from before 0.4 had no writer
+in them, so a database upgraded from 0.3 may store a re-deposited text once more; an
+erasure recorded under an old id still refuses it.
 
 `remember` also takes:
 
 - `source_record_id` — the record it came from, e.g. `zendesk:ticket:123`, so a
   deletion in the source system can be followed here.
 - `actor` — who deposited it, e.g. `{"agent": "support-bot", "user": "anna@acme.com"}`.
-- `taints` — optional labels a depositor may attach. They travel to every claim and
-  belief built from the signal and are returned on reads. etchmem does not set or
-  enforce them; access control uses writers.
 
 ## Erasure (GDPR Art. 17)
 
@@ -710,7 +719,7 @@ existing clients).
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /remember` | Deposit a raw signal (`source`, `scope`, `extract_mode`, `occurred_at`, `context`, `context_parent`, `source_record_id`, `actor`, `taints`). |
+| `POST /remember` | Deposit a raw signal (`source`, `scope`, `extract_mode`, `occurred_at`, `context`, `context_parent`, `source_record_id`, `actor`). |
 | `POST /recall` | Semantic recall over beliefs; `scope` takes a list; `as_of` for time-travel. |
 | `POST /sleep` | Run one worker tick now (batch → extract → fold). |
 | `POST /export` | Dump all etches to JSON files. |
@@ -916,7 +925,7 @@ tests/
   test_integration.py    offline end-to-end (fake embedder + stub agents)
   test_anonymization.py  pseudonym consistency, regex scrub, signal exclusion
   test_mcp.py            tool registration, /mcp mount, tool ↔ service parity
-  test_gateway_api.py    API key, /v1, signal metadata + taints, scopes, forget
+  test_gateway_api.py    API key, /v1, signal metadata, scopes, forget
 ```
 
 ## Tests

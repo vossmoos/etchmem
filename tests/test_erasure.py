@@ -1,4 +1,4 @@
-"""Erasing a name that is only a value; depositor labels are passive.
+"""Erasing a name that is only a value.
 
 Offline: fake embeddings and scripted extractors.
 """
@@ -75,33 +75,6 @@ def test_erasing_an_unknown_name_says_nothing_matched(svc):
     svc.sleep()
     report = svc.forget(entity="Nobody Atall", reason="test")
     assert report.signals_deleted == 0 and "nothing matched" in report.note
-
-
-MIXED = ("Acme Corp|company|contract_value|48,000 EUR\n"
-         "Acme Corp|company|account_manager|Tom Krause")
-
-
-def _beliefs(svc):
-    return {e.property: e for e in svc.know("Acme Corp").etches}
-
-
-def test_depositor_labels_cover_every_claim_of_the_signal(svc):
-    svc.remember(MIXED, "import", "sales", taints=["finance"])
-    svc.sleep()
-    b = _beliefs(svc)
-    assert b["contract_value"].taints == ["finance"] and b["account_manager"].taints == ["finance"]
-
-
-def test_an_unlabelled_deposit_stays_unlabelled(svc):
-    svc.remember(MIXED, "mossy", "sales")
-    svc.sleep()
-    assert all(e.taints == [] for e in _beliefs(svc).values())
-
-
-def test_the_extractor_has_no_say_in_labels():
-    from app.agents import ExtractedClaim, claim_system
-    assert "taints" not in ExtractedClaim.model_fields
-    assert "sensitivity labels" not in claim_system()
 
 
 def test_records_are_not_subjects_in_the_prompt():

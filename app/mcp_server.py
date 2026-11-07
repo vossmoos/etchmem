@@ -69,7 +69,6 @@ def remember(
     context_parent: str | None = None,
     source_record_id: str | None = None,
     actor: dict[str, Any] | None = None,
-    taints: list[str] | None = None,
 ) -> dict[str, Any]:
     """Deposit a raw signal (call note, tool output, email, decision...).
     `source` = who produced it (e.g. 'agent-33'); `scope` = domain tag
@@ -80,14 +79,13 @@ def remember(
     `context` = the conversation it was said in (a thread, a ticket's comments, a
     meeting) and `context_parent` the one around it (the channel): it is then read
     with what that conversation has been about. `source_record_id` = the record
-    it came from in its source system; `actor` = who deposited it; `taints` =
-    sensitivity labels ('pii', 'finance') that every belief built from it keeps."""
+    it came from in its source system; `actor` = who deposited it."""
     svc = _svc()
     sig_id, stored, parsed = svc.remember(
         data=data, source=source, scope=scope,
         extract_mode=extract_mode, metadata=metadata, occurred_at=occurred_at,
         context=context, context_parent=context_parent,
-        source_record_id=source_record_id, actor=actor, taints=taints)
+        source_record_id=source_record_id, actor=actor)
     status = "new" if stored else ("erased" if svc.was_erased(sig_id) else "duplicate")
     return {"id": sig_id, "stored": stored, "status": status,
             "occurred_at": parsed, "occurred_at_declared": bool(parsed)}

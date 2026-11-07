@@ -70,9 +70,6 @@ class Signal:
     source_record_id: str | None = None
     # Who deposited it: the agent and, when known, the person it acted for.
     actor: dict[str, Any] = field(default_factory=dict)
-    # Sensitivity labels (e.g. "pii", "finance"). They travel to every claim
-    # and belief built from this signal, so a gateway can redact on read.
-    taints: list[str] = field(default_factory=list)
 
     @property
     def event_at(self) -> float:
@@ -103,7 +100,6 @@ class Claim:
     status: str = C_NEW
     created_at: float = 0.0
     updated_at: float = 0.0
-    taints: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -150,8 +146,6 @@ class Etch:
     # A retracted value is not deleted: it stays here with a low weight, so the
     # memory knows both that it is no longer valid and that it once was.
     values: list[dict] = field(default_factory=list)
-    # Union of the taints of every claim behind this belief.
-    taints: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -205,17 +199,17 @@ def scope_clause(column: str, scope: str | Sequence[str] | None) -> tuple[str | 
 
 _SIGNAL_COLS = """id, content, source, scope, metadata, embedding, created_at,
                  occurred_at, expires_at, status, extract_mode, canonical_id,
-                 context_id, context_parent, source_record_id, actor, taints"""
+                 context_id, context_parent, source_record_id, actor"""
 _N_SIGNAL_COLS = len(_SIGNAL_COLS.split(","))
 _CLAIM_COLS = """id, entity_id, entity_name, property, value, value_norm,
                 polarity, event_time, ingest_time, sources,
                 evidence_signal_ids, corroboration_count, confidence, scope,
-                status, created_at, updated_at, value_entity_id, detail, taints"""
+                status, created_at, updated_at, value_entity_id, detail"""
 
 _ETCH_COLS = """id, entity_id, entity_name, property, current_value, status,
                 confidence, narrative, version, scope, source, claim_ids,
                 source_ids, created_at, updated_at, embedding, value_entity_id,
-                details, evidence, value_weights, taints"""
+                details, evidence, value_weights"""
 _ENTITY_COLS = "id, name, type, aliases, scope, created_at, updated_at, embedding"
 
 
@@ -250,8 +244,7 @@ class LeftStore:
                     context_id    VARCHAR,
                     context_parent VARCHAR,
                     source_record_id VARCHAR,
-                    actor         VARCHAR,
-                    taints        VARCHAR
+                    actor         VARCHAR
                 )""")
             self._x("""
                 CREATE TABLE IF NOT EXISTS claims (
@@ -273,8 +266,7 @@ class LeftStore:
                     scope               VARCHAR,
                     status              VARCHAR,
                     created_at          {DOUBLE},
-                    updated_at          {DOUBLE},
-                    taints              VARCHAR
+                    updated_at          {DOUBLE}
                 )""")
             self._migrate()
             for sql in (
@@ -299,11 +291,11 @@ class LeftStore:
         if "occurred_at" not in cols:
             self._x("ALTER TABLE signals ADD COLUMN occurred_at {DOUBLE}")
             self._x("UPDATE signals SET occurred_at = created_at WHERE occurred_at IS NULL")
-        for col in ("context_id", "context_parent", "source_record_id", "actor", "taints"):
+        for col in ("context_id", "context_parent", "source_record_id", "actor"):
             if col not in cols:
                 self._x(f"ALTER TABLE signals ADD COLUMN {col} VARCHAR")
         ccols = self._db.columns("claims")
-        for col in ("value_entity_id", "detail", "taints"):
+        for col in ("value_entity_id", "detail"):
             if col not in ccols:
                 self._x(f"ALTER TABLE claims ADD COLUMN {col} VARCHAR")
 
@@ -318,14 +310,14 @@ class LeftStore:
                 INSERT INTO signals (id, content, source, scope, metadata, embedding,
                     created_at, occurred_at, expires_at, status, extract_mode,
                     canonical_id, context_id, context_parent, source_record_id,
-                    actor, taints)
-                VALUES (?, ?, ?, ?, ?, {VEC}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    actor)
+                VALUES (?, ?, ?, ?, ?, {VEC}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [sig.id, sig.content, sig.source, sig.scope, _j(sig.metadata),
                  self._db.vec(sig.embedding), sig.created_at, sig.occurred_at,
                  sig.expires_at, sig.status, sig.extract_mode, sig.canonical_id,
                  sig.context_id, sig.context_parent, sig.source_record_id,
-                 _j(sig.actor), _j(sorted(set(sig.taints)))],
+                 _j(sig.actor)],
             )
             return True
 
@@ -373,14 +365,13 @@ class LeftStore:
         where = " AND ".join(clauses)
         with self._lock:
             rows = self._x(
-                f"""SELECT id, content, source, scope, created_at, taints,
+                f"""SELECT id, content, source, scope, created_at,
                            {{DIST:embedding}} AS dist
                     FROM signals WHERE {where} ORDER BY dist LIMIT ?""",
                 [self._db.vec(qvec), *params, top_k],
             ).fetchall()
-        return [Hit(r[0], r[1], 1.0 - float(r[6]),
-                    {"source": r[2], "scope": r[3], "created_at": r[4],
-                     "taints": _u(r[5], [])}) for r in rows]
+        return [Hit(r[0], r[1], 1.0 - float(r[5]),
+                    {"source": r[2], "scope": r[3], "created_at": r[4]}) for r in rows]
 
     def expire(self, now: float | None = None) -> int:
         now = now or time.time()
@@ -397,7 +388,7 @@ class LeftStore:
         with self._lock:
             existing = self._x(
                 """SELECT sources, evidence_signal_ids, corroboration_count, event_time,
-                          detail, taints
+                          detail
                    FROM claims WHERE id = ?""", [claim.id]).fetchone()
             if existing:
                 sources = sorted(set(_u(existing[0], []) + claim.sources))
@@ -409,26 +400,25 @@ class LeftStore:
                 detail = existing[4]
                 if claim.detail and (not detail or claim.event_time >= (existing[3] or 0.0)):
                     detail = claim.detail
-                taints = sorted(set(_u(existing[5], []) + claim.taints))
                 self._x(
                     """UPDATE claims SET sources = ?, evidence_signal_ids = ?,
                        corroboration_count = ?, event_time = ?, detail = ?, status = ?,
-                       updated_at = ?, taints = ? WHERE id = ?""",
+                       updated_at = ? WHERE id = ?""",
                     [_j(sources), _j(evidence), count, event_time, detail, C_NEW,
-                     time.time(), _j(taints), claim.id])
+                     time.time(), claim.id])
             else:
                 self._x(
                     """INSERT INTO claims (id, entity_id, entity_name, property, value,
                         value_norm, polarity, event_time, ingest_time, sources,
                         evidence_signal_ids, corroboration_count, confidence, scope,
-                        status, created_at, updated_at, value_entity_id, detail, taints)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        status, created_at, updated_at, value_entity_id, detail)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [claim.id, claim.entity_id, claim.entity_name, claim.property,
                      claim.value, claim.value_norm, claim.polarity, claim.event_time,
                      claim.ingest_time, _j(claim.sources), _j(claim.evidence_signal_ids),
                      claim.corroboration_count, claim.confidence, claim.scope,
                      claim.status, claim.created_at, claim.updated_at,
-                     claim.value_entity_id, claim.detail, _j(sorted(set(claim.taints)))])
+                     claim.value_entity_id, claim.detail])
 
     def pairs_with_new_claims(self) -> list[tuple[str, str]]:
         with self._lock:
@@ -573,16 +563,16 @@ class LeftStore:
         return len(ids)
 
     def replace_claim_evidence(self, claim_id: str, evidence: list[str],
-                               sources: list[str], taints: list[str]) -> None:
+                               sources: list[str]) -> None:
         """What a claim rests on after some of its signals were erased; it will
         be folded again."""
         with self._lock:
             self._x(
                 """UPDATE claims SET evidence_signal_ids = ?, sources = ?,
-                   corroboration_count = ?, taints = ?, status = ?, updated_at = ?
+                   corroboration_count = ?, status = ?, updated_at = ?
                    WHERE id = ?""",
                 [_j(sorted(evidence)), _j(sorted(sources)), len(evidence),
-                 _j(sorted(taints)), C_NEW, time.time(), claim_id])
+                 C_NEW, time.time(), claim_id])
 
     def delete_signals(self, ids: list[str]) -> int:
         if not ids:
@@ -626,8 +616,7 @@ class LeftStore:
             embedding=_vec(r[5]), created_at=r[6],
             occurred_at=r[7] or 0.0, expires_at=r[8], status=r[9],
             extract_mode=r[10], canonical_id=r[11], context_id=r[12],
-            context_parent=r[13], source_record_id=r[14], actor=_u(r[15], {}),
-            taints=_u(r[16], []))
+            context_parent=r[13], source_record_id=r[14], actor=_u(r[15], {}))
 
     @staticmethod
     def _row_to_claim(r) -> Claim:
@@ -636,8 +625,7 @@ class LeftStore:
             value_norm=r[5], polarity=r[6], event_time=r[7], ingest_time=r[8],
             sources=_u(r[9], []), evidence_signal_ids=_u(r[10], []),
             corroboration_count=r[11], confidence=r[12], scope=r[13], status=r[14],
-            created_at=r[15], updated_at=r[16], value_entity_id=r[17], detail=r[18],
-            taints=_u(r[19], []))
+            created_at=r[15], updated_at=r[16], value_entity_id=r[17], detail=r[18])
 
 
 # ── Right store ──────────────────────────────────────────────────────────────
@@ -686,8 +674,7 @@ class RightStore:
                     value_entity_id VARCHAR,
                     details      VARCHAR,
                     evidence     VARCHAR,
-                    value_weights VARCHAR,
-                    taints       VARCHAR
+                    value_weights VARCHAR
                 )""")
             self._x("""
                 CREATE TABLE IF NOT EXISTS etch_versions (
@@ -744,7 +731,7 @@ class RightStore:
     def _migrate(self) -> None:
         """Additive migration for right DBs created before relations existed."""
         cols = self._db.columns("etches")
-        for col in ("value_entity_id", "details", "evidence", "value_weights", "taints"):
+        for col in ("value_entity_id", "details", "evidence", "value_weights"):
             if col not in cols:
                 self._x(f"ALTER TABLE etches ADD COLUMN {col} VARCHAR")
         vcols = self._db.columns("etch_versions")
@@ -935,13 +922,13 @@ class RightStore:
                 """INSERT INTO etches (id, entity_id, entity_name, property,
                     current_value, status, confidence, narrative, version, scope,
                     source, claim_ids, source_ids, created_at, updated_at, embedding,
-                    value_entity_id, details, evidence, value_weights, taints)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,{VEC},?,?,?,?,?)""",
+                    value_entity_id, details, evidence, value_weights)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,{VEC},?,?,?,?)""",
                 [e.id, e.entity_id, e.entity_name, e.property, e.current_value, e.status,
                  e.confidence, e.narrative, e.version, e.scope, e.source,
                  _j(e.claim_ids), _j(e.source_ids), e.created_at, e.updated_at,
                  self._db.vec(e.embedding), e.value_entity_id, _j(e.details),
-                 _j(e.evidence), _j(e.values), _j(sorted(set(e.taints)))])
+                 _j(e.evidence), _j(e.values)])
 
     def delete_etch(self, etch_id: str) -> int:
         """A belief and every version of it. Returns the versions removed."""
@@ -1032,19 +1019,19 @@ class RightStore:
             rows = self._x(
                 f"""SELECT id, entity_id, entity_name, property, current_value, status,
                            confidence, narrative, version, scope, source, created_at,
-                           updated_at, details, evidence, value_weights, taints,
+                           updated_at, details, evidence, value_weights,
                            {{DIST:embedding}} AS dist
                     FROM etches WHERE {where} ORDER BY dist LIMIT ?""",
                 [self._db.vec(qvec), *params, top_k]).fetchall()
         out = []
         for r in rows:
-            out.append(Hit(r[0], r[7], 1.0 - float(r[17]), {
+            out.append(Hit(r[0], r[7], 1.0 - float(r[16]), {
                 "entity_id": r[1], "entity_name": r[2], "property": r[3],
                 "current_value": r[4], "status": r[5], "confidence": r[6],
                 "version": r[8], "scope": r[9], "source": r[10],
                 "created_at": r[11], "updated_at": r[12],
                 "details": _u(r[13], []), "evidence": _u(r[14], {}),
-                "values": _u(r[15], []), "taints": _u(r[16], [])}))
+                "values": _u(r[15], [])}))
         return out
 
     def etches_for_entity(self, entity_id: str,
@@ -1173,7 +1160,7 @@ class RightStore:
                     version=r[8], scope=r[9], source=r[10], claim_ids=_u(r[11], []),
                     source_ids=_u(r[12], []), created_at=r[13], updated_at=r[14],
                     embedding=_vec(r[15]), value_entity_id=r[16], details=_u(r[17], []),
-                    evidence=_u(r[18], {}), values=_u(r[19], []), taints=_u(r[20], []))
+                    evidence=_u(r[18], {}), values=_u(r[19], []))
 
 
 # ── Container ────────────────────────────────────────────────────────────────

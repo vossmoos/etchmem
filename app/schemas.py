@@ -40,11 +40,6 @@ class RememberRequest(BaseModel):
         default_factory=dict,
         description="Who deposited it, e.g. {\"agent\": \"support-bot\", \"user\": "
                     "\"anna@acme.com\"}. Recorded for provenance; never interpreted.")
-    taints: list[str] = Field(
-        default_factory=list,
-        description="Sensitivity labels such as 'pii' or 'finance'. Every claim and "
-                    "belief built from this signal carries them, so a gateway can "
-                    "redact or withhold on read.")
 
 
 class RememberResponse(BaseModel):
@@ -161,7 +156,6 @@ class RecallResult(BaseModel):
     evidence: EvidenceOut | None = None
     quote: Quote | None = None
     values: list[ValueWeight] = Field(default_factory=list)
-    taints: list[str] = Field(default_factory=list)
     created_at: float = 0.0
     updated_at: float | None = None
 
@@ -214,8 +208,6 @@ class EtchOut(BaseModel):
     values: list[ValueWeight] = Field(default_factory=list)
     claim_ids: list[str] = Field(default_factory=list)
     source_ids: list[str] = Field(default_factory=list)
-    taints: list[str] = Field(default_factory=list,
-                              description="Union of the taints of the signals behind it.")
     created_at: float
     updated_at: float
 
@@ -353,7 +345,6 @@ class ClaimOut(BaseModel):
     sources: list[str] = Field(default_factory=list)
     evidence_signal_ids: list[str] = Field(default_factory=list)
     scope: str | None = None
-    taints: list[str] = Field(default_factory=list)
     event_time: float = 0.0
     ingest_time: float = 0.0
     created_at: float = 0.0
@@ -366,7 +357,6 @@ class SignalOut(BaseModel):
     scope: str
     source_record_id: str | None = None
     actor: dict = Field(default_factory=dict)
-    taints: list[str] = Field(default_factory=list)
     created_at: float = 0.0
     occurred_at: float = 0.0
 
@@ -384,7 +374,6 @@ class SignalRecordResponse(BaseModel):
     context_parent: str | None = None
     source_record_id: str | None = None
     actor: dict = Field(default_factory=dict)
-    taints: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict,
                            description="As deposited, plus once resolved: `subjects` (what it "
                                        "is about), `associations` (related knowledge it "
