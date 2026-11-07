@@ -36,9 +36,10 @@ trail from every answer back to its sources — and does it transparently.
 Keep your RAG for document search. Use etchmem for what your system *believes*
 and which patterns it knows.
 
-Backed by **DuckDB** (two databases) and a **Pydantic AI** model cascade.
-One process, one `docker compose up`, a REST API **and an MCP interface**
-(same operations as tools at `/mcp`).
+Backed by **PostgreSQL + pgvector** (or embedded **DuckDB** with zero setup)
+and a **Pydantic AI** model cascade. One process, one `docker compose up`, a
+REST API **and an MCP interface** (same operations as tools at `/v1/mcp`),
+optionally behind an API key.
 
 See [TODO.md](TODO.md) for the product vision and planned capabilities.
 
@@ -219,9 +220,29 @@ pick up changes.
 ### Label + detail: a short name with the author's full wording
 
 A fact's `value` has to stay short: it is the claim's identity, so dedup,
-corroboration, the gate and confidence all work on it. But some facts need the
-author's full wording too ("avoid the core-product framing — this campaign is
-about CAST Radar, the new product"). Declare the property with `detail: true`:
+corroboration, the gate and confidence all work on it. But many facts are
+useless without the author's full wording ("avoid the core-product framing —
+this campaign is about CAST Radar, the new product").
+
+**By default every claim may carry it.** The extractor fills `detail` whenever
+the short value loses what was said (a message, a complaint, a problem and its
+cause, a decision with its reasons), and leaves it empty when the value says
+everything (a status, a tier, a date). The `value` of such a claim becomes a
+2-5 word label. Nothing has to be declared. `ETCHMEM_DETAIL_DEFAULT=false`
+restores the opt-in behaviour: only properties declared `detail: true` keep a
+wording.
+
+Declaring a property with `detail: true` still helps: its hints steer the label
+and the wording.
+
+**Long sources stay short.** A wording is a condensed version in the author's
+own words: the extractor keeps their exact terms, names, numbers, dates and
+conditions, and drops greetings, signatures, quoted history, repetition and
+other facts (which get claims of their own). It never paraphrases into its own
+vocabulary. It is asked for at most `ETCHMEM_DETAIL_MAX_CHARS` / 6 words (400
+characters, about 66 words), and a longer wording is cut at a sentence end when
+it is stored, so a model that copies a whole document cannot flood recall. The
+full text stays in the signal, one dossier call away.
 
 ```yaml
 properties:
@@ -245,9 +266,38 @@ signal arriving late never overwrites a newer wording.
 `current_value` keeps the label(s). The wording is in `details`
 (`[{"value": label, "detail": wording}]`) on recall, `know`, `export`,
 `/history` and the dossier, one entry per label for multi-value properties,
-and in the etch's narrative so recall matches on it. Properties without
-`detail: true` behave exactly as before, and a `detail` the model emits for
-one of them is dropped.
+and in the etch's narrative so recall matches on it. With
+`ETCHMEM_DETAIL_DEFAULT=false`, a `detail` the model emits for an undeclared
+property is dropped.
+
+### Quotes: who said it, where, when, in their words
+
+Each belief returned by `recall` and `know` carries a `quote`: the newest signal
+behind its current value, so an agent can cite the fact, judge how fresh it is,
+check the wording against the original and open the source record, without a
+dossier call.
+
+```json
+"quote": {
+  "signal_id": "sig_…",
+  "excerpt": "…the October invoice was charged twice and asks for a credit note before the end of the month…",
+  "source": "zendesk",
+  "source_record_id": "zendesk:ticket:123",
+  "actor": {"agent": "mossy", "user": "maria@acme.com"},
+  "occurred_at": 1762509600.0
+}
+```
+
+The `excerpt` is the original text around the fact, at most `ETCHMEM_QUOTE_CHARS`
+characters (300; 0 turns quotes off). `quotes=ref` on `recall` or `know` gives
+shorter replies: the excerpt is then kept only for beliefs without a wording (a
+status, a tier), since elsewhere it mostly repeats the wording. Useful when an
+agent reads many beliefs at once.
+
+With `as_of`, the quote is the newest signal known at that time. With claims
+anonymization on, `excerpt` and `actor` are always left out: raw signals keep
+personal data. A quote's signal is one of the belief's own, so its taints are
+already among the belief's `taints`. The dossier still returns every signal in full.
 
 ## Ingesting a historical archive
 
@@ -538,16 +588,130 @@ The API process also runs an in-process async **worker loop**. The
 signal/claim `status` column *is* the queue. `POST /remember` writes a signal
 and returns `202` immediately; the worker drains
 `new → batched → extracted → consolidated` on a cadence. `POST /sleep` runs
-one tick on demand. Only one process touches DuckDB, sidestepping its
-single-writer constraint. When volume demands it, the worker lifts out into
-its own container behind a real broker + Postgres/pgvector — see TODO.md.
+one tick on demand. Run one etchmem process per database (or per
+`ETCHMEM_DATABASE_SCHEMA`): the worker assumes it is the only one folding.
+
+## Storage: PostgreSQL + pgvector, or DuckDB
+
+Set `ETCHMEM_DATABASE_URL` and etchmem keeps everything in PostgreSQL:
+
+```bash
+ETCHMEM_DATABASE_URL=postgresql://etchmem:secret@db:5432/etchmem
+ETCHMEM_DATABASE_SCHEMA=acme      # optional: one schema per instance / tenant
+```
+
+On start it creates the `vector` extension, its tables and HNSW indexes on the
+embedding columns (the role needs `CREATE` on the database, or create the
+extension beforehand). Similarity search orders by pgvector's cosine distance,
+which the index serves. Several instances can share one database, each in its
+own schema.
+
+Leave `ETCHMEM_DATABASE_URL` empty and etchmem uses two embedded DuckDB files
+in `ETCHMEM_DATA_DIR` (`left.duckdb`: signals and claims; `right.duckdb`:
+entities, beliefs, versions) — no setup, fine for a laptop or a test. Both
+engines run the same SQL (`app/db.py` renders it per engine) and the same test
+suite. There is no automatic copy from DuckDB to Postgres: a new Postgres
+instance starts empty.
+
+## Access: API key
+
+```bash
+ETCHMEM_API_KEY=etm_...            # comma-separate several keys to rotate
+```
+
+With a key set, every REST and MCP call needs `Authorization: Bearer <key>` or
+`X-API-Key: <key>`; anything else gets `401`. `/health` stays open for probes,
+and the `/ui` page loads and asks for the key once per browser tab. Without a
+key etchmem is open — keep it on localhost, or behind a gateway that is the
+only thing allowed to reach it.
+
+## Scopes: topics, not permissions
+
+Every signal has a `scope`: the knowledge area it belongs to, e.g. the skill that
+produced or needs it (`customer-service-triage`, `spare-parts`). Reads can be narrowed
+to one scope or several, so an agent running a skill gets focused knowledge:
+
+```bash
+POST /v1/recall  {"query": "Acme renewal", "scope": ["spare-parts", "warranty"]}
+GET  /v1/etches?scope=spare-parts&scope=warranty       # or ?scope=spare-parts,warranty
+GET  /v1/entity/Acme/etches?scope=spare-parts
+```
+
+Omit `scope` for every scope. Scopes say nothing about who may read what: that is
+the job of writers (below).
+
+Subjects are resolved **within** a scope: "Acme" in two scopes is two entities, and
+`know` merges them when it reads several scopes. Databases created before 0.4 may hold
+an entity that collected facts from more than one scope; those keep working.
+
+## Writers: who may read what
+
+Every signal has one writer, its `source`: the agent that deposited it, an import job,
+or a source system. A belief records every writer behind it. Reads take `writers` and
+return only beliefs **all** of whose writers are in the list:
+
+```bash
+POST /v1/recall  {"query": "Acme", "writers": ["mossy", "zendesk"]}
+GET  /v1/entity/Acme/etches?writers=mossy&writers=zendesk
+GET  /v1/etch/company_acme::tier/dossier?writers=mossy        # 404 if not readable
+```
+
+A belief built partly from a writer the reader may not see is not shown at all.
+Without `writers` there is no filter. etchmem never decides who may read what: a
+gateway such as Myco sets `writers` from the caller's permissions
+(`memory:<writer>:read`), and stamps the calling agent as the writer of what it deposits.
+
+## Provenance on every signal
+
+`remember` also takes:
+
+- `source_record_id` — the record it came from, e.g. `zendesk:ticket:123`, so a
+  deletion in the source system can be followed here.
+- `actor` — who deposited it, e.g. `{"agent": "support-bot", "user": "anna@acme.com"}`.
+- `taints` — optional labels a depositor may attach. They travel to every claim and
+  belief built from the signal and are returned on reads. etchmem does not set or
+  enforce them; access control uses writers.
+
+## Erasure (GDPR Art. 17)
+
+```bash
+POST /v1/forget  {"entity": "Maria Muster", "reason": "DSR-2026-114"}
+POST /v1/forget  {"source_record_ids": ["zendesk:ticket:123"]}
+POST /v1/forget  {"signal_ids": ["c554…"]}
+```
+
+1. **Signals** — the ones named, the ones from those source records, and for a
+   subject every signal that cites it as evidence *or names it in its text*
+   (including signals not extracted yet) are deleted. The name is matched in the text
+   even when memory never made it a subject (a person who is only a value in someone
+   else's belief, "primary contact = Maria Muster"): `signals_matched_by_name` counts
+   those, and when nothing at all matched the report says so in `note`. A signal is erased whole:
+   other facts it carried lose that evidence too.
+2. **Claims** lose the erased signals as evidence; a claim left with none, and
+   every claim about the subject or pointing at it, is deleted.
+3. **Beliefs** — the subject's own, and any left without claims, are deleted with
+   all their versions. A belief that lost only part of its evidence keeps its
+   timeline, but every stored version is blanked to `[erased]` (when it changed
+   stays, what it said goes), its head is blanked at once, and it is
+   re-consolidated from what remains (`refold: "done"`, or `"pending"` until the
+   next worker tick if no model is reachable).
+4. **Tombstone** — the report is kept (`GET /v1/erasures`) with counts and the
+   erased signals' ids (content hashes), never the text or the subject's name. A
+   signal with the same content is refused afterwards (`status: "erased"`), and
+   the tombstones let you re-apply erasures after restoring a backup.
+
+A name stands for every entity it resolves to, in every scope. Erasure is
+REST-only on purpose; no MCP tool can delete memory.
 
 ## API
 
+All paths live under `/v1` (the same paths without the prefix still answer, for
+existing clients).
+
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /remember` | Deposit a raw signal (`source`, `scope`, `extract_mode`, `occurred_at`, `context`, `context_parent`). |
-| `POST /recall` | Semantic recall over beliefs; `as_of` for time-travel. |
+| `POST /remember` | Deposit a raw signal (`source`, `scope`, `extract_mode`, `occurred_at`, `context`, `context_parent`, `source_record_id`, `actor`, `taints`). |
+| `POST /recall` | Semantic recall over beliefs; `scope` takes a list; `as_of` for time-travel. |
 | `POST /sleep` | Run one worker tick now (batch → extract → fold). |
 | `POST /export` | Dump all etches to JSON files. |
 | `POST /associate` | What the memory holds for a phrase: matching beliefs, their subjects' facts, and connected nodes. |
@@ -557,8 +721,10 @@ its own container behind a real broker + Postgres/pgvector — see TODO.md.
 | `GET /etch/{id}/dossier` | Full provenance: etch + versions + claims + source signals. |
 | `GET /signal/{id}` | What one signal became: status, context, focus, subjects, associations, claims. |
 | `GET /context/{id}` | One conversation: its focus and its signals in order. |
+| `POST /forget` | Erase a subject, source records or signals; returns the erasure report. |
+| `GET /erasures` | Erasure tombstones: id, time, reason, counts. No personal data. |
 | `GET /stats` | Queue depths + counts (signals/claims/entities/etches/contested). |
-| `GET /health` | Liveness + active config. |
+| `GET /health` | Liveness + active config (database engine, whether a key is required). Never needs a key. |
 | `GET /ui` | **Etchmem Beliefs Explorer** — built-in report UI. |
 
 REST, any language, any agent framework. Interactive docs at
@@ -583,17 +749,23 @@ included). Disable the UI with `ETCHMEM_UI_ENABLED=false`.
 
 The same operations are exposed as **MCP tools** — `remember`, `recall`,
 `know`, `etches`, `associate`, `sleep`, `export`, `stats`, `etch_history`, `dossier`, `signal`, `context` — over streamable HTTP at
-`http://localhost:8000/mcp` (stateless, JSON responses). One process serves
-both protocols, so Claude Code / Claude Desktop / any MCP client can use
-etchmem as a memory backend directly:
+`http://localhost:8000/v1/mcp` (also `/mcp`; stateless, JSON responses). One
+process serves both protocols, so Claude Code / Claude Desktop / any MCP client
+can use etchmem as a memory backend directly:
 
 ```json
 {
   "mcpServers": {
-    "etchmem": { "type": "http", "url": "http://localhost:8000/mcp" }
+    "etchmem": {
+      "type": "http",
+      "url": "http://localhost:8000/v1/mcp",
+      "headers": { "Authorization": "Bearer etm_..." }
+    }
   }
 }
 ```
+
+Drop `headers` when no `ETCHMEM_API_KEY` is set. There is no `forget` tool.
 
 ## Export: your knowledge as training data
 
@@ -651,24 +823,32 @@ curl -X POST localhost:8000/recall -H 'content-type: application/json' \
 ## Run with Docker
 
 ```bash
-cp .env.example .env          # add your OPENAI_API_KEY
+cp .env.example .env          # add your OPENAI_API_KEY (and an ETCHMEM_API_KEY)
 docker compose up --build
 ```
 
-DuckDB files persist in the `etchmem-data` volume at `/data`.
+The compose file runs PostgreSQL with pgvector next to etchmem; its data
+persists in the `etchmem-postgres` volume, exports in `etchmem-data`. To run
+on DuckDB instead, set `ETCHMEM_DATABASE_URL=` (empty) and drop the `postgres`
+service.
 
 ## Run locally
 
 ```bash
 pip install -r requirements.txt
 export OPENAI_API_KEY=sk-...
-export ETCHMEM_DATA_DIR=./data
+export ETCHMEM_DATA_DIR=./data       # DuckDB, or set ETCHMEM_DATABASE_URL for Postgres
 uvicorn app.main:app --reload
 ```
 
 ## Configuration
 
 Via environment / `.env` (see `.env.example`). Highlights:
+
+- `ETCHMEM_DATABASE_URL` — PostgreSQL + pgvector; empty = DuckDB files in
+  `ETCHMEM_DATA_DIR`. `ETCHMEM_DATABASE_SCHEMA` — this instance's schema.
+- `ETCHMEM_API_KEY` — require a key on every REST and MCP call (comma-separated
+  for rotation). Empty = open.
 
 - `ETCHMEM_CLAIM_MODEL` / `ETCHMEM_ETCH_MODEL` — cascade model strings.
 - `ETCHMEM_RELAX_CHAT_METADATA` (false) — for an OpenAI-compatible gateway whose
@@ -703,6 +883,11 @@ Via environment / `.env` (see `.env.example`). Highlights:
   signals in one prompt get their subjects and facts mixed.
 - `ETCHMEM_CLAIMS_ANONYMIZATION` — anonymize personal data in claims/etches
   (see above). Default `false`.
+- `ETCHMEM_DETAIL_DEFAULT` (true) — every claim may keep the author's full
+  wording; `false` keeps it only for properties declared `detail: true`.
+- `ETCHMEM_DETAIL_MAX_CHARS` (400) — longest wording kept per claim; the
+  extractor condenses to it and a longer one is cut when stored. 0 = no limit.
+- `ETCHMEM_QUOTE_CHARS` (300) — length of a quote's excerpt; 0 turns quotes off.
 - `ETCHMEM_WORKER_ENABLED`, `ETCHMEM_WORKER_INTERVAL_SECONDS`,
   `ETCHMEM_EXTRACT_MIN_BATCH`, `ETCHMEM_EXTRACT_MAX_WAIT_SECONDS` — worker cadence.
 
@@ -715,7 +900,8 @@ app/
   embeddings.py pluggable EmbeddingProvider (openai | local | fake)
   text.py       entity-name / value normalization, slugs
   hashing.py    content + claim hashing (corroboration & idempotency)
-  stores.py     LeftStore (signals, claims) + RightStore (entities, etches, versions)
+  db.py         one SQL surface over PostgreSQL + pgvector or DuckDB
+  stores.py     LeftStore (signals, claims) + RightStore (entities, etches, versions, erasures)
   dedup.py      Stage 1 — embedding dedup
   ext.py        claim extensions: YAML domain vocabulary → prompt + enum enforcement
   agents.py     Stage 2 claim_agent + Stage 3 conflict resolver (Pydantic AI)
@@ -723,20 +909,26 @@ app/
   gate.py       deterministic routing gate + resolution policy + confidence
   anonymize.py  claims anonymization: pseudonym labels, prompt blocks, regex scrub
   worker.py     Pipeline (batch/extract/fold) + in-process WorkerLoop
-  service.py    wires everything; remember/recall/sleep/export/stats/history
-  mcp_server.py MCP tools (FastMCP, streamable HTTP; mounted at /mcp)
-  main.py       FastAPI app + routes + MCP mount + worker lifespan
+  service.py    wires everything; remember/recall/sleep/export/stats/history/forget
+  mcp_server.py MCP tools (FastMCP, streamable HTTP; mounted at /v1/mcp and /mcp)
+  main.py       FastAPI app + /v1 routes + API-key guard + MCP mount + worker lifespan
 tests/
   test_integration.py    offline end-to-end (fake embedder + stub agents)
   test_anonymization.py  pseudonym consistency, regex scrub, signal exclusion
   test_mcp.py            tool registration, /mcp mount, tool ↔ service parity
+  test_gateway_api.py    API key, /v1, signal metadata + taints, scopes, forget
 ```
 
 ## Tests
 
 ```bash
 pip install -r requirements.txt pytest
-pytest -q       # fully offline; no API key needed
+pytest -q       # fully offline on DuckDB; no API key needed
+
+# the same suite on PostgreSQL + pgvector (one schema per test, dropped after)
+docker run -d --rm -p 55432:5432 -e POSTGRES_USER=etchmem -e POSTGRES_PASSWORD=etchmem \
+    pgvector/pgvector:pg17
+ETCHMEM_TEST_DATABASE_URL=postgresql://etchmem:etchmem@localhost:55432/etchmem pytest -q
 ```
 
 Covered: entity-boundary (no contamination), corroboration raising confidence,

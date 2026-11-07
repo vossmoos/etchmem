@@ -33,3 +33,23 @@ def normalize_value(value: str) -> str:
     """Normalize a property value for equality comparison in the gate."""
     s = _PUNCT.sub(" ", value.lower())
     return _WS.sub(" ", s).strip()
+
+
+_SENTENCE_END = re.compile(r"[.!?…](?=\s)")
+
+
+def clamp_text(text: str, limit: int) -> str:
+    """`text` with whitespace collapsed, at most `limit` characters (0 = no limit).
+
+    A longer text is cut at the last sentence end inside the limit when that
+    keeps at least half of it, else at the last space, and marked with "…".
+    """
+    flat = re.sub(r"\s+", " ", text or "").strip()
+    if limit <= 0 or len(flat) <= limit:
+        return flat
+    head = flat[:limit - 1]
+    ends = [m.end() for m in _SENTENCE_END.finditer(head + " ")]
+    if ends and ends[-1] >= limit // 2:
+        return head[:ends[-1]].rstrip() + " …"
+    space = head.rfind(" ")
+    return (head[:space] if space >= limit // 2 else head).rstrip(" ,;:-") + "…"

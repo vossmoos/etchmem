@@ -1,6 +1,7 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
-duckdb>=1.1.0
+duckdb>=1.1.0  # embedded storage when ETCHMEM_DATABASE_URL is unset
+psycopg[binary]>=3.2  # PostgreSQL + pgvector storage (ETCHMEM_DATABASE_URL)
 pydantic>=2.8.0
 pydantic-settings>=2.4.0
 pydantic-ai-slim[openai,mistral]>=0.0.20  # extras are required: the meta package no longer pulls provider SDKs

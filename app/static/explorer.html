@@ -310,8 +310,25 @@ function pct(x) { return Math.round((x ?? 0) * 100); }
 // API base: resolve relative to this page so path-prefix proxies keep working.
 function api(path) { return new URL(path, window.location.href).toString(); }
 
+// When the server requires ETCHMEM_API_KEY, ask for it once per browser tab.
+function apiKey() { try { return sessionStorage.getItem("etchmem_api_key") || ""; } catch { return ""; } }
+function withKey(opts) {
+  const key = apiKey();
+  if (!key) return opts;
+  const o = { ...(opts || {}) };
+  o.headers = { ...(o.headers || {}), "X-API-Key": key };
+  return o;
+}
+
 async function getJSON(path, opts) {
-  const r = await fetch(api(path), opts);
+  let r = await fetch(api(path), withKey(opts));
+  if (r.status === 401) {
+    const key = window.prompt("This etchmem server needs an API key:");
+    if (key) {
+      try { sessionStorage.setItem("etchmem_api_key", key.trim()); } catch {}
+      r = await fetch(api(path), withKey(opts));
+    }
+  }
   if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${await r.text()}`);
   return r.json();
 }

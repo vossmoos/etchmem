@@ -196,9 +196,9 @@ class ExtRegistry:
                          " (2-5 words, canonical, the same label every time the"
                          " same fact comes up)"
                          + (f" — {s.label_hint}" if s.label_hint else "")
-                         + "; `detail` is the full wording as the author"
-                         " stated it, one or two sentences, keeping the correct"
-                         " facts and conditions"
+                         + "; `detail` is the fact in the author's own words,"
+                         " condensed as the `detail` rules say, keeping the"
+                         " correct facts and conditions"
                          + (f" — {s.detail_hint}" if s.detail_hint else "") + ".")
             lines.append(line)
         return (
