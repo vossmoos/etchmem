@@ -94,8 +94,10 @@ class EntityResolver:
             self.stats.unmatched += 1
         norm = key or normalize_entity_name(name, entity_type)
 
+        # Subjects are resolved within the signal's scope: "Acme" in sales and
+        # "Acme" in hr are two entities, so beliefs never fold across scopes.
         # 1. exact normalized-alias match
-        existing = self._store.find_entity_by_alias(norm)
+        existing = self._store.find_entity_by_alias(norm, scope)
         if existing:
             if key is not None:
                 self.stats.by_key += 1
@@ -109,7 +111,7 @@ class EntityResolver:
         if key is None and not self._registry.is_exact_match(entity_type):
             threshold = self._registry.sim_threshold(
                 entity_type, settings.entity_sim_threshold)
-            for entity, sim in self._store.search_entities(vec, top_k=3):
+            for entity, sim in self._store.search_entities(vec, top_k=3, scope=scope):
                 if sim >= threshold:
                     self.stats.by_fuzzy += 1
                     return self._maybe_add_alias(entity, norm)
@@ -118,7 +120,7 @@ class EntityResolver:
         self.stats.created += 1
         now = time.time()
         entity = Entity(
-            id=slugify(f"{entity_type}:{norm}"),
+            id=self._new_id(slugify(f"{entity_type}:{norm}"), scope),
             name=name,
             type=entity_type,
             aliases=[norm],
@@ -130,13 +132,22 @@ class EntityResolver:
         self._store.upsert_entity(entity)
         return entity
 
-    def find(self, name: str, entity_type: str) -> Entity | None:
+    def find(self, name: str, entity_type: str, scope: str | None = None) -> Entity | None:
         """An existing entity for this name, by key or alias; never creates one.
         For bookkeeping (what a conversation was about), not for attaching facts."""
         if self._registry.is_ignored(entity_type):
             return None
         key, _ = self._registry.canonical_key_detail(entity_type, name)
-        return self._store.find_entity_by_alias(key or normalize_entity_name(name, entity_type))
+        return self._store.find_entity_by_alias(
+            key or normalize_entity_name(name, entity_type), scope)
+
+    def _new_id(self, base: str, scope: str | None) -> str:
+        """The plain slug, unless another scope already holds it: then the
+        scope is appended, so existing ids keep meaning what they meant."""
+        taken = self._store.get_entity(base)
+        if taken is None or taken.scope == scope or not scope:
+            return base
+        return f"{base}__{slugify(scope)}"
 
     def resolve_key(self, key: str, entity_type: str, scope: str | None) -> Entity | None:
         """Resolve a subject from an already-extracted identifier key.
@@ -148,14 +159,15 @@ class EntityResolver:
         if self._registry.is_ignored(entity_type):
             self.stats.ignored += 1
             return None
-        existing = self._store.find_entity_by_alias(key)
+        existing = self._store.find_entity_by_alias(key, scope)
         if existing:
             self.stats.by_key += 1
             return self._maybe_add_alias(existing, key)
         self.stats.created += 1
         now = time.time()
         entity = Entity(
-            id=slugify(f"{entity_type}:{key}"), name=key.upper(), type=entity_type,
+            id=self._new_id(slugify(f"{entity_type}:{key}"), scope), name=key.upper(),
+            type=entity_type,
             aliases=[key], scope=scope, created_at=now, updated_at=now,
             embedding=self._embed.embed_one(key),
         )

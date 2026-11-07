@@ -1,10 +1,35 @@
 services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: etchmem-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-etchmem}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-etchmem}
+      POSTGRES_DB: ${POSTGRES_DB:-etchmem}
+    volumes:
+      - etchmem-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-etchmem} -d ${POSTGRES_DB:-etchmem}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   etchmem-server:
-    image: aolishchuk/etchmem:0.3.3
+    build: .
+    image: aolishchuk/etchmem:0.4.0
     container_name: etchmem-server
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8000:8000"
     environment:
+      # Storage: PostgreSQL + pgvector. Unset it to fall back to DuckDB in /data.
+      ETCHMEM_DATABASE_URL: ${ETCHMEM_DATABASE_URL:-postgresql://etchmem:etchmem@postgres:5432/etchmem}
+      ETCHMEM_DATABASE_SCHEMA: ${ETCHMEM_DATABASE_SCHEMA:-}
+      # Access: set a key for anything beyond a laptop (Bearer or X-API-Key).
+      ETCHMEM_API_KEY: ${ETCHMEM_API_KEY:-}
       # LLM cascade (Pydantic AI) — swap models freely.
       ETCHMEM_CLAIM_MODEL: ${ETCHMEM_CLAIM_MODEL:-openai:gpt-5-mini}
       ETCHMEM_ETCH_MODEL: ${ETCHMEM_ETCH_MODEL:-openai:gpt-5.5}
@@ -13,7 +38,7 @@ services:
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       LOCAL_EMBEDDING_MODEL: ${LOCAL_EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
-      # Storage (DuckDB files live here)
+      # Exports and the local embedding model cache live here
       ETCHMEM_DATA_DIR: /data
       # Stage 1 / entities / fold
       ETCHMEM_SIGNAL_DEDUP_DISTANCE: ${ETCHMEM_SIGNAL_DEDUP_DISTANCE:-0.08}
@@ -45,4 +70,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  etchmem-postgres:
   etchmem-data:

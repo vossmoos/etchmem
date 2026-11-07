@@ -44,8 +44,8 @@ class ExtractedClaim(BaseModel):
     event_time: str | None = Field(None, description="ISO-8601 time the fact became true, if stated.")
     detail: str | None = Field(
         None,
-        description="Only for properties marked WITH DETAIL: the full wording of the fact "
-                    "as the author stated it. Leave empty for every other property.")
+        description="The fact in the author's own words, one or two sentences, when the "
+                    "short value alone loses what was said (see the rules on `detail`).")
     confidence: float = Field(0.7, ge=0.0, le=1.0, description="Extraction confidence.")
 
 
@@ -66,8 +66,8 @@ A claim is one atomic fact: (entity, property, value). Rules:
 - Use a SHORT canonical `value` (1-3 words, lowercase where natural) so that
   equal facts get equal values (e.g. always "signed", not "signed the deal").
   Exception: a property marked WITH DETAIL takes a 2-5 word LABEL as `value`
-  and the author's full wording in `detail`. Never fill `detail` otherwise.
-- One signal may yield several claims, or zero. If the signal states no durable
+  and the author's full wording in `detail`.
+{detail_rule}- One signal may yield several claims, or zero. If the signal states no durable
   fact (chatter, questions, greetings), return an empty list.
 - Set polarity = "negated" for explicit negations ("did NOT sign").
 - ONE SUBJECT PER CLAIM. If a sentence states something about several
@@ -75,6 +75,19 @@ A claim is one atomic fact: (entity, property, value). Rules:
   subjects in one `entity_name`: "A and B both fail" is two claims. When a
   sentence names one subject and mentions another as context ("part X for
   machine Y"), decide which one the fact is about and name only that one.
+- ONE DIRECTION PER RELATION. A fact that links two subjects is one claim, on
+  the subject that holds the attribute — usually the organization, account,
+  project or product: "Acme Corp · account_manager = Lisa Brandt", "Acme Corp ·
+  primary_support_contact = Jonas Weber". Never restate it from the other side
+  ("Lisa Brandt · account_manager_for = Acme Corp"): two directions drift apart
+  when the fact changes.
+- SUBJECTS ARE THINGS, NOT RECORDS. A ticket, invoice, contract, deal, order,
+  message, meeting or document is not a subject. State what it tells about the
+  organization or person it belongs to, on that subject, and put what it is into
+  the property or value: "Acme Corp · billing_issue = invoice charged twice",
+  "Acme Corp · contract_value = 40,000 EUR", never "October invoice · ..." or
+  "one-year logistics contract · ...". Things the vocabulary below declares as
+  entity types (an article number, a part) stay subjects.
 - Do NOT invent facts. Do NOT merge different entities.
 - If known entities are provided, reuse the exact name when it's the same one.
 - If known labels are provided, reuse the exact label when a signal states the
@@ -97,6 +110,39 @@ A claim is one atomic fact: (entity, property, value). Rules:
   the text ("Friday", "yesterday", "in two weeks") against the sent date, and
   write every date value and `event_time` as an absolute ISO-8601 date.
 """
+
+
+_DETAIL_ONLY_DECLARED = """\
+- Never fill `detail` for a property that is not marked WITH DETAIL.
+"""
+
+_DETAIL_BY_DEFAULT = """\
+- `detail` keeps what the short value cannot: fill it for EVERY claim whose
+  value alone loses what was said — a message or request and its content, a
+  complaint, a problem and its cause, a decision with its reasons and
+  conditions, a lesson learned. The `value` of such a claim is a short LABEL
+  (2-5 words) naming the fact, the same label every time the same fact comes up. Leave `detail` empty when
+  the value says everything (a status, a tier, a date, an amount, yes/no).
+"""
+
+
+_DETAIL_FORM = """\
+- How to write a `detail`: CONDENSE, never copy. Keep the author's own words —
+  their exact terms, names, numbers, dates and conditions, in their wording —
+  and drop everything else: greetings, signatures, quoted earlier messages,
+  repetition, background, other facts (they get their own claims). Do not
+  paraphrase into your own vocabulary and add nothing of your own.{limit}
+"""
+
+
+def claim_system() -> str:
+    """The extractor's base instructions, with the `detail` rules in force."""
+    rule = _DETAIL_BY_DEFAULT if settings.detail_default else _DETAIL_ONLY_DECLARED
+    words = settings.detail_max_chars // 6
+    limit = (f"\n  At most {words} words, however long the signal is: from a long"
+             " document keep\n  only the phrases that carry this one claim."
+             if words > 0 else "")
+    return _CLAIM_SYSTEM.replace("{detail_rule}", rule + _DETAIL_FORM.format(limit=limit))
 
 
 _SUBJECT_CORRECTION = """
@@ -443,13 +489,13 @@ class PydanticAIClaimExtractor(ClaimExtractor):
         self._agent = Agent(
             model_for(model or settings.claim_model),
             output_type=ExtractionResult,
-            system_prompt=_CLAIM_SYSTEM + self._registry.prompt_block() + anon,
+            system_prompt=claim_system() + self._registry.prompt_block() + anon,
             model_settings=model_settings(),
         )
         self._batch_agent = Agent(
             model_for(model or settings.claim_model),
             output_type=BatchExtractionResult,
-            system_prompt=_CLAIM_SYSTEM + self._registry.prompt_block()
+            system_prompt=claim_system() + self._registry.prompt_block()
                           + _CLAIM_BATCH_SUFFIX + anon,
             model_settings=model_settings(),
         )

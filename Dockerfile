@@ -23,7 +23,8 @@ COPY app ./app
 COPY ext ./ext
 ENV ETCHMEM_EXT_DIR=/srv/ext
 
-# Data dir for the two DuckDB files (mount a volume here in compose).
+# Data dir: DuckDB files (when ETCHMEM_DATABASE_URL is unset), exports and the
+# local embedding model cache. Mount a volume here.
 ENV ETCHMEM_DATA_DIR=/data
 RUN mkdir -p /data
 VOLUME ["/data"]

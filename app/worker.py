@@ -36,7 +36,7 @@ from app.stores import (
     C_NEW, C_CONSOLIDATED, S_BATCHED, S_EXTRACTED, S_NEW,
     Claim, Etch, Stores,
 )
-from app.text import normalize_value
+from app.text import clamp_text, normalize_entity_name, normalize_value
 
 log = logging.getLogger("etchmem.worker")
 
@@ -54,6 +54,7 @@ class TickSummary:
     claims_unsupported: int = 0      # claims the verify step found the signal not to state
     subject_retries: int = 0         # signals re-read after a compound entity_name
     relations_resolved: int = 0      # claim values resolved to an entity (edges)
+    reverse_retired: int = 0         # reverse beliefs retired when their fact changed
     # How subjects were identified this tick — see entities.ResolutionStats.
     entities: dict[str, int] = field(default_factory=dict)
 
@@ -251,6 +252,8 @@ class Pipeline:
             members = self._s.left.signals_with_canonical(rep.id)
             sources = sorted({m.source for m in members})
             evidence_ids = sorted({m.id for m in members})
+            # Every claim inherits the sensitivity of the signals behind it.
+            taints = sorted({t for m in members for t in (m.taints or [])})
 
             kept = []
             for j, ec in enumerate(result.claims):
@@ -284,11 +287,11 @@ class Pipeline:
                     continue
                 for entity in subjects:
                     self._write_claim(ec, entity, rep, sources, evidence_ids,
-                                      now, summary)
+                                      now, summary, taints)
                     touched.append(entity.id)
             if resolution is not None:
                 for r in resolution.subjects:
-                    found = self._entities.find(r.name, r.entity_type)
+                    found = self._entities.find(r.name, r.entity_type, rep.scope)
                     if found is not None:
                         touched.append(found.id)
             for conv in (rep.context_id, rep.context_parent):
@@ -375,7 +378,7 @@ class Pipeline:
             if not same or res is None:
                 continue
             for r in res.subjects:
-                ent = self._entities.find(r.name, r.entity_type)
+                ent = self._entities.find(r.name, r.entity_type, sig.scope)
                 key = ent.id if ent else (r.name, r.entity_type)
                 if key not in seen:
                     seen.add(key)
@@ -477,7 +480,8 @@ class Pipeline:
                 if len(out) - fixed >= n:
                     break
                 add(right.get_entity(hit.row.get("entity_id")), "similar")
-            for ent, _sim in right.search_entities(sig.embedding, top_k=n * 4):
+            for ent, _sim in right.search_entities(sig.embedding, top_k=n * 4,
+                                                   scope=sig.scope):
                 if len(out) - fixed >= n:
                     break
                 add(ent, "similar")
@@ -545,7 +549,8 @@ class Pipeline:
             return None          # several identifiers in one value: no safe edge
         return self._entities.resolve(ec.value, rel_type, scope)
 
-    def _write_claim(self, ec, entity, rep, sources, evidence_ids, now, summary) -> None:
+    def _write_claim(self, ec, entity, rep, sources, evidence_ids, now, summary,
+                     taints: list[str] | None = None) -> None:
         display_name, value = entity.name, ec.value
         obj = self._resolve_object(ec, rep.scope)
         if settings.claims_anonymization:
@@ -555,13 +560,18 @@ class Pipeline:
             value = scrub(value)
         # A resolved object IS the normalised value: equality is entity identity.
         value_norm = obj.id if obj is not None else normalize_value(value)
-        # The full wording rides next to the label, only where the property
-        # declares it; it never takes part in the claim's identity.
+        # The full wording rides next to the label (on every property by default,
+        # else only where the property declares it); it never takes part in the
+        # claim's identity.
         detail = (ec.detail or "").strip() or None
-        if detail and not self._registry.has_detail(ec.property):
+        if detail and not (settings.detail_default or self._registry.has_detail(ec.property)):
             detail = None
         if detail and settings.claims_anonymization:
             detail = scrub(detail)
+        if detail:
+            # The prompt asks for a condensed wording; this is the hard stop, so a
+            # model that copies a whole document never floods recall with it.
+            detail = clamp_text(detail, settings.detail_max_chars) or None
         if obj is not None:
             summary.relations_resolved += 1
         cid = claim_hash(entity.id, ec.property, value_norm, ec.polarity)
@@ -585,6 +595,7 @@ class Pipeline:
             status=C_NEW,
             created_at=now,
             updated_at=now,
+            taints=list(taints or []),
         )
         self._s.left.upsert_claim(claim)
         summary.claims_written += 1
@@ -606,7 +617,12 @@ class Pipeline:
         return {s.id: s.source for s in self._s.left.signals_by_ids(ids)}
 
     def fold_pass(self, summary: TickSummary) -> None:
-        for entity_id, prop in self._s.left.pairs_with_new_claims():
+        pairs = list(self._s.left.pairs_with_new_claims())
+        seen_pairs = set(pairs)
+        i = 0
+        while i < len(pairs):
+            entity_id, prop = pairs[i]
+            i += 1
             claims = self._s.left.claims_for_pair(entity_id, prop)
             if not claims:
                 continue
@@ -669,6 +685,7 @@ class Pipeline:
                 embedding=self._embed.embed_one(narrative),
                 value_entity_id=value_entity_id, details=details,
                 evidence=evidence, values=values,
+                taints=sorted({t for c in claims for t in c.taints}),
             )
             self._s.right.upsert_etch(etch)
 
@@ -686,6 +703,76 @@ class Pipeline:
                     summary.etches_updated += 1
 
             self._s.left.set_claims_status([c.id for c in claims], C_CONSOLIDATED)
+
+            if (existing is not None and changed and existing.current_value
+                    and normalize_value(existing.current_value) != normalize_value(value)
+                    and prop not in settings.multi_value_set):
+                for pair in self._retire_reverse(entity_id, entity_name, scope,
+                                                 existing.current_value, claims, summary):
+                    if pair not in seen_pairs:          # fold the retraction this tick
+                        seen_pairs.add(pair)
+                        pairs.append(pair)
+
+    def _retire_reverse(self, entity_id: str, entity_name: str, scope: str | None,
+                        old_value: str, claims: list[Claim],
+                        summary: TickSummary) -> list[tuple[str, str]]:
+        """Retire the beliefs that state a replaced fact from the other side.
+
+        "Acme · account_manager = Lisa" often comes with "Lisa · account_manager_for
+        = Acme" from the same record. When Acme's account manager becomes Tom, the
+        reverse belief would stay current and keep answering "Lisa" to anyone who
+        searches for it. So: on the entity named by the old value, every belief
+        whose value names this subject, and which rests only on the evidence of the
+        replaced value, gets a negation from the evidence of the new one. The gate
+        then marks it retracted ("No longer valid"), with its history intact.
+        Returns the (entity, property) pairs that now need folding.
+        """
+        old_norm = normalize_value(old_value)
+        old_evidence = {sid for c in claims if c.polarity == "asserted"
+                        and (c.value_norm == old_norm or normalize_value(c.value) == old_norm)
+                        for sid in c.evidence_signal_ids}
+        newer = [c for c in claims if c.status == C_NEW and c.polarity == "asserted"
+                 and normalize_value(c.value) != old_norm]
+        if not old_evidence or not newer:
+            return []
+        subject_names = {normalize_entity_name(entity_name), normalize_entity_name(entity_name, "person")}
+        right = self._s.right
+        others = {e.id: e for name in {normalize_entity_name(old_value),
+                                       normalize_entity_name(old_value, "person")}
+                  for e in right.find_entities_by_alias(name, scope) if e.id != entity_id}
+        evidence = sorted({sid for c in newer for sid in c.evidence_signal_ids})
+        sources = sorted({src for c in newer for src in c.sources})
+        when = max((c.event_time for c in newer), default=time.time())
+        taints = sorted({t for c in newer for t in c.taints})
+        touched: list[tuple[str, str]] = []
+        for other in others.values():
+            for etch in right.etches_for_entity(other.id, scope=scope):
+                if etch.property in settings.multi_value_set:
+                    continue
+                names_subject = (etch.value_entity_id == entity_id or
+                                 normalize_entity_name(etch.current_value) in subject_names or
+                                 normalize_entity_name(etch.current_value, "person") in subject_names)
+                if not names_subject or not set(etch.source_ids) <= old_evidence:
+                    continue
+                asserted = [c for c in self._s.left.claims_for_pair(other.id, etch.property)
+                            if c.polarity == "asserted"
+                            and normalize_value(c.value) == normalize_value(etch.current_value)]
+                if not asserted or all(c.event_time >= when for c in asserted):
+                    continue                            # nothing older to retire
+                ref = asserted[0]
+                now = time.time()
+                self._s.left.upsert_claim(Claim(
+                    id=claim_hash(other.id, etch.property, ref.value_norm, "negated"),
+                    entity_id=other.id, entity_name=etch.entity_name, property=etch.property,
+                    value=ref.value, value_norm=ref.value_norm, polarity="negated",
+                    event_time=when, ingest_time=now, sources=sources,
+                    evidence_signal_ids=evidence, corroboration_count=len(evidence),
+                    confidence=max(c.confidence for c in newer),
+                    value_entity_id=ref.value_entity_id, scope=etch.scope, status=C_NEW,
+                    created_at=now, updated_at=now, taints=taints))
+                summary.reverse_retired += 1
+                touched.append((other.id, etch.property))
+        return touched
 
 
 def _active(values: list[dict]) -> set[tuple[str, bool]]:

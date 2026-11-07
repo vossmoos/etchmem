@@ -34,7 +34,21 @@ class Settings(BaseSettings):
     )
 
     # ── Storage ────────────────────────────────────────────────────────────
+    # PostgreSQL + pgvector, e.g. "postgresql://etchmem:secret@db:5432/etchmem".
+    # Empty = embedded DuckDB files in `data_dir` (zero setup, one process).
+    database_url: str = ""
+    # Postgres schema for this instance's tables, so several etchmem instances
+    # (tenants, environments) can share one database. Empty = the default schema.
+    database_schema: str = ""
+    # DuckDB files, export dumps and the local embedding model cache live here.
     data_dir: str = "./data"
+
+    # ── Access ─────────────────────────────────────────────────────────────
+    # When set, every REST and MCP call must send `Authorization: Bearer <key>`
+    # (or `X-API-Key: <key>`). /health stays open for probes. Comma-separate
+    # several keys to rotate without downtime. Empty = no authentication, for
+    # local use only.
+    api_key: str = ""
 
     # ── Extensions (declarative claim/etch vocabulary) ─────────────────────
     # Folder of YAML files declaring extra *properties* the extractor should
@@ -142,8 +156,22 @@ class Settings(BaseSettings):
     # text for provenance, are never surfaced).
     claims_anonymization: bool = False
 
+    # ── Full wording ───────────────────────────────────────────────────────
+    # True: every claim may carry the author's full wording (`detail`) next to
+    # its short value, whenever the value alone loses what was said. False:
+    # only properties declared `detail: true` in ext/*.yaml keep a wording.
+    detail_default: bool = True
+    # Longest wording kept per claim, in characters (~6 per word). The extractor
+    # is asked to condense to this in the author's own words; a longer one is
+    # cut at a sentence end when stored. 0 = no limit.
+    detail_max_chars: int = 400
+
     # ── Recall ─────────────────────────────────────────────────────────────
     recall_signal_weight: float = 0.6           # left-DB freshness enrichment
+    # Each belief returned by recall and know carries a `quote`: the newest
+    # signal behind its current value (excerpt, author, source record, time).
+    # Characters of excerpt; 0 turns quotes off.
+    quote_chars: int = 300
 
     # ── Worker (in-process; no external broker) ────────────────────────────
     worker_enabled: bool = True
@@ -178,6 +206,10 @@ class Settings(BaseSettings):
 
     # ── Derived helpers ────────────────────────────────────────────────────
     @property
+    def api_keys(self) -> list[str]:
+        return [k.strip() for k in self.api_key.split(",") if k.strip()]
+
+    @property
     def multi_value_set(self) -> set[str]:
         return {p.strip() for p in self.multi_value_properties.split(",") if p.strip()}
 
@@ -198,6 +230,9 @@ _ENV_ALIASES = {
     "embedding_provider": "EMBEDDING_PROVIDER",
     "openai_embedding_model": "OPENAI_EMBEDDING_MODEL",
     "local_embedding_model": "LOCAL_EMBEDDING_MODEL",
+    "database_url": "ETCHMEM_DATABASE_URL",
+    "database_schema": "ETCHMEM_DATABASE_SCHEMA",
+    "api_key": "ETCHMEM_API_KEY",
     "data_dir": "ETCHMEM_DATA_DIR",
     "ext_dir": "ETCHMEM_EXT_DIR",
     "signal_dedup_distance": "ETCHMEM_SIGNAL_DEDUP_DISTANCE",
@@ -220,6 +255,9 @@ _ENV_ALIASES = {
     "verify_model": "ETCHMEM_VERIFY_MODEL",
     "subject_retry_enabled": "ETCHMEM_SUBJECT_RETRY_ENABLED",
     "claims_anonymization": "ETCHMEM_CLAIMS_ANONYMIZATION",
+    "detail_default": "ETCHMEM_DETAIL_DEFAULT",
+    "detail_max_chars": "ETCHMEM_DETAIL_MAX_CHARS",
+    "quote_chars": "ETCHMEM_QUOTE_CHARS",
     "worker_enabled": "ETCHMEM_WORKER_ENABLED",
     "worker_interval_seconds": "ETCHMEM_WORKER_INTERVAL_SECONDS",
     "extract_min_batch": "ETCHMEM_EXTRACT_MIN_BATCH",

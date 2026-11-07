@@ -18,6 +18,9 @@ Tools:
   dossier       — full provenance of one etch: versions, claims, raw signals
   signal        — one signal: its status, what it is about, the claims from it
   context       — one conversation: what it has been about, its signals in order
+
+Reads take `scope` as one scope or a list (any of them). Erasure (`forget`) is
+REST-only on purpose: an agent should not be able to delete memory by mistake.
 """
 from __future__ import annotations
 
@@ -64,6 +67,9 @@ def remember(
     occurred_at: str | float | None = None,
     context: str | None = None,
     context_parent: str | None = None,
+    source_record_id: str | None = None,
+    actor: dict[str, Any] | None = None,
+    taints: list[str] | None = None,
 ) -> dict[str, Any]:
     """Deposit a raw signal (call note, tool output, email, decision...).
     `source` = who produced it (e.g. 'agent-33'); `scope` = domain tag
@@ -73,39 +79,49 @@ def remember(
     they all arrive dated today and cannot be ordered against each other.
     `context` = the conversation it was said in (a thread, a ticket's comments, a
     meeting) and `context_parent` the one around it (the channel): it is then read
-    with what that conversation has been about."""
-    sig_id, stored, parsed = _svc().remember(
+    with what that conversation has been about. `source_record_id` = the record
+    it came from in its source system; `actor` = who deposited it; `taints` =
+    sensitivity labels ('pii', 'finance') that every belief built from it keeps."""
+    svc = _svc()
+    sig_id, stored, parsed = svc.remember(
         data=data, source=source, scope=scope,
         extract_mode=extract_mode, metadata=metadata, occurred_at=occurred_at,
-        context=context, context_parent=context_parent)
-    return {"id": sig_id, "stored": stored,
-            "status": "new" if stored else "duplicate",
+        context=context, context_parent=context_parent,
+        source_record_id=source_record_id, actor=actor, taints=taints)
+    status = "new" if stored else ("erased" if svc.was_erased(sig_id) else "duplicate")
+    return {"id": sig_id, "stored": stored, "status": status,
             "occurred_at": parsed, "occurred_at_declared": bool(parsed)}
 
 
 @mcp.tool()
 def recall(
     query: str,
-    scope: str | None = None,
+    scope: str | list[str] | None = None,
     source: str | None = None,
     top_k: int = 5,
     include_signals: bool = True,
     as_of: str | None = None,
     as_of_basis: Literal["ingest", "event"] = "ingest",
+    quotes: Literal["ref", "full"] = "full",
+    writers: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Semantic recall over consolidated beliefs (etches), optionally blended
-    with fresh raw signals. Pass an ISO-8601 `as_of` for time-travel: what did
-    the system believe at that moment?"""
+    with fresh raw signals. Each belief has `details` (the wording) and a
+    `quote`: who said it, in which source record, when, and an excerpt of the
+    original text. quotes='ref' keeps the excerpt only where a belief has no
+    wording, for shorter replies. Pass an ISO-8601 `as_of` for time-travel: what
+    did the system believe at that moment?"""
     results = _svc().recall(
         query=query, scope=scope, source=source, top_k=top_k,
-        include_signals=include_signals, as_of=as_of, as_of_basis=as_of_basis)
+        include_signals=include_signals, as_of=as_of, as_of_basis=as_of_basis,
+        quotes=quotes, writers=writers)
     return [r.model_dump() for r in results]
 
 
 @mcp.tool()
 def associate(
     query: str,
-    scope: str | None = None,
+    scope: str | list[str] | None = None,
     top_k: int = 5,
     hops: int = 1,
     as_of: str | None = None,
@@ -131,6 +147,9 @@ def know(
     as_of: str | None = None,
     entity_type: str | None = None,
     as_of_basis: Literal["ingest", "event"] = "ingest",
+    scope: str | list[str] | None = None,
+    quotes: Literal["ref", "full"] = "full",
+    writers: list[str] | None = None,
 ) -> dict[str, Any]:
     """EVERY belief about one subject — exhaustive, unlike `recall`.
 
@@ -141,9 +160,12 @@ def know(
     embedding distance and returns top_k, so a fact can be missing without the
     caller being able to tell. `ref` is an entity id ('product_msm_0808') or a
     surface name ('MSM-0808'). `as_of` (ISO-8601) gives the beliefs as they
-    stood then."""
+    stood then. Each belief has `details` (the wording) and a `quote` (who said
+    it, which source record, when, and an excerpt of the original text);
+    quotes='ref' keeps the excerpt only where a belief has no wording."""
     facts = _svc().know(ref, as_of=as_of, entity_type=entity_type,
-                        as_of_basis=as_of_basis)
+                        as_of_basis=as_of_basis, scope=scope, quotes=quotes,
+                        writers=writers)
     if facts is None:
         return {"error": f"no entity matching {ref!r}", "etches": []}
     return facts.model_dump()
@@ -151,7 +173,7 @@ def know(
 
 @mcp.tool()
 def etches(
-    scope: str | None = None,
+    scope: str | list[str] | None = None,
     property: str | list[str] | None = None,
     entity_type: str | list[str] | None = None,
     status: Literal["settled", "contested"] | None = None,

@@ -43,7 +43,7 @@ class Scripted(ClaimExtractor):
             ExtractedClaim(entity_name="Acme", entity_type="company",
                            property="avoid_pattern", value=label, detail=detail,
                            event_time=when),
-            # a detail on a property that did not opt in must be dropped
+            # a property that did not opt in: kept by default, dropped when off
             ExtractedClaim(entity_name="Acme", entity_type="company",
                            property="status_note", value="noted", detail="ignored"),
         ])
@@ -100,12 +100,30 @@ def test_label_and_detail_are_stored_and_recalled(tmp_path):
     assert hit.details and hit.details[0].detail.startswith("This campaign")
 
 
-def test_property_without_detail_drops_it(tmp_path):
+def test_undeclared_property_keeps_wording_by_default(tmp_path):
+    svc = _svc(tmp_path)
+    svc.remember("x|wording|2026-07-01", "s", "t")
+    svc.sleep()
+    e = _etch(svc, "status_note")
+    assert [d.model_dump() for d in e.details] == [{"value": "noted", "detail": "ignored"}]
+
+
+def test_undeclared_property_drops_wording_when_default_is_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(_cfg.settings, "detail_default", False)
     svc = _svc(tmp_path)
     svc.remember("x|wording|2026-07-01", "s", "t")
     svc.sleep()
     e = _etch(svc, "status_note")
     assert e.details == []
+    assert _etch(svc, "avoid_pattern").details              # declared: still kept
+
+
+def test_extractor_prompt_follows_the_detail_default(monkeypatch):
+    from app.agents import claim_system
+    assert "fill it for EVERY claim" in claim_system()
+    monkeypatch.setattr(_cfg.settings, "detail_default", False)
+    assert "Never fill `detail` for a property that is not marked" in claim_system()
+    assert "{detail_rule}" not in claim_system()
 
 
 def test_same_label_new_wording_latest_wins_and_corroborates(tmp_path):
@@ -153,3 +171,30 @@ def test_time_travel_returns_details_of_that_time(tmp_path):
     svc.sleep()
     snap = svc.stores.right.version_as_of(e1.id, e1.updated_at, "event")
     assert snap is not None and "details" in snap
+
+
+def test_prompt_asks_to_condense_in_the_authors_words(monkeypatch):
+    from app.agents import claim_system
+    text = claim_system()
+    assert "CONDENSE, never copy" in text and "At most 66 words" in text
+    monkeypatch.setattr(_cfg.settings, "detail_max_chars", 0)
+    assert "At most" not in claim_system()
+
+
+def test_a_copied_document_is_cut_when_stored(tmp_path):
+    svc = _svc(tmp_path)
+    long = ("The reviewer rejected the draft. " * 30).strip()
+    svc.remember(f"core framing|{long}|2026-07-01", "slack.reject", "t")
+    svc.sleep()
+    detail = _etch(svc, "avoid_pattern").details[0].detail
+    assert len(detail) <= _cfg.settings.detail_max_chars
+    assert detail.endswith("draft. …")                         # cut at a sentence end
+
+
+def test_clamp_text():
+    from app.text import clamp_text
+    assert clamp_text("  short\n text ", 400) == "short text"
+    assert clamp_text("x " * 500, 0) == ("x " * 500).strip()
+    one_sentence = "word " * 200
+    cut = clamp_text(one_sentence, 100)
+    assert len(cut) <= 100 and cut.endswith("word…")

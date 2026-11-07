@@ -32,12 +32,26 @@ class RememberRequest(BaseModel):
                           "earlier messages; same words in another context = another signal.")
     context_parent: str | None = Field(
         None, description="The conversation around it, e.g. the channel of a thread.")
+    source_record_id: str | None = Field(
+        None, description="The record this came from in its source system, e.g. "
+                          "'zendesk:ticket:123'. Lets an erasure there be followed here "
+                          "with `forget(source_record_ids=[...])`.")
+    actor: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Who deposited it, e.g. {\"agent\": \"support-bot\", \"user\": "
+                    "\"anna@acme.com\"}. Recorded for provenance; never interpreted.")
+    taints: list[str] = Field(
+        default_factory=list,
+        description="Sensitivity labels such as 'pii' or 'finance'. Every claim and "
+                    "belief built from this signal carries them, so a gateway can "
+                    "redact or withhold on read.")
 
 
 class RememberResponse(BaseModel):
     id: str
     stored: bool
-    status: str
+    status: str = Field(..., description="new | duplicate | erased (this exact "
+                                       "signal was erased before and is refused)")
     message: str
     occurred_at: float = Field(
         0.0, description="Event time as parsed and stored, epoch seconds. Echoed "
@@ -49,9 +63,24 @@ class RememberResponse(BaseModel):
 
 # ── recall ─────────────────────────────────────────────────────────────────
 
+Scopes = str | list[str] | None
+_SCOPE_HELP = ("One scope, or a list: any of them. Omit for every scope. An empty "
+               "list matches nothing.")
+
+
+_QUOTES_HELP = ("Each belief's `quote`: 'full' (default) = author, source record, time "
+                "and the original excerpt; 'ref' = the excerpt only for beliefs without "
+                "a wording, for shorter replies.")
+
+
+_WRITERS_HELP = ("Only beliefs ALL of whose writers (deposit sources) are in this list; "
+                 "omit for no filter. A gateway sets it from the caller's permissions.")
+
+
 class RecallRequest(BaseModel):
     query: str
-    scope: str | None = None
+    scope: Scopes = Field(None, description=_SCOPE_HELP)
+    writers: list[str] | None = Field(None, description=_WRITERS_HELP)
     source: str | None = None
     top_k: int = Field(5, ge=1, le=50)
     include_signals: bool = Field(True, description="Blend fresh raw signals from the left DB.")
@@ -66,14 +95,29 @@ class RecallRequest(BaseModel):
                     "BELIEVED then. 'event' = what was TRUE then, by the dates "
                     "on the underlying facts. They differ whenever a source "
                     "reported late.")
+    quotes: Literal["ref", "full"] = Field("full", description=_QUOTES_HELP)
 
 
 
 class DetailItem(BaseModel):
     """One labelled fact: `value` is the short label, `detail` the author's full
-    wording. Only properties declared `detail: true` carry these."""
+    wording (every property by default; see ETCHMEM_DETAIL_DEFAULT)."""
     value: str
     detail: str
+
+
+class Quote(BaseModel):
+    """The newest signal behind a belief's current value: what was actually
+    written, by whom, where and when. The dossier has every signal in full."""
+    signal_id: str
+    excerpt: str | None = Field(None, description="The signal's text around the fact (with "
+                                "quotes='ref' only for beliefs without a wording); "
+                                "never when claims anonymization is on.")
+    source: str
+    source_record_id: str | None = None
+    actor: dict[str, Any] = Field(default_factory=dict,
+                                  description="The depositing agent and the person it acted for.")
+    occurred_at: float = 0.0
 
 
 class ValueWeight(BaseModel):
@@ -115,7 +159,9 @@ class RecallResult(BaseModel):
     source: str | None = None
     details: list[DetailItem] = Field(default_factory=list)
     evidence: EvidenceOut | None = None
+    quote: Quote | None = None
     values: list[ValueWeight] = Field(default_factory=list)
+    taints: list[str] = Field(default_factory=list)
     created_at: float = 0.0
     updated_at: float | None = None
 
@@ -139,6 +185,7 @@ class SleepResponse(BaseModel):
     claims_dropped: int = 0
     subject_retries: int = 0
     relations_resolved: int = 0
+    reverse_retired: int = 0
     entities: dict[str, int] = Field(
         default_factory=dict,
         description="How subjects were identified: entities_by_key / by_alias / "
@@ -163,9 +210,12 @@ class EtchOut(BaseModel):
     value_entity_id: str | None = None
     details: list[DetailItem] = Field(default_factory=list)
     evidence: EvidenceOut | None = None
+    quote: Quote | None = None
     values: list[ValueWeight] = Field(default_factory=list)
     claim_ids: list[str] = Field(default_factory=list)
     source_ids: list[str] = Field(default_factory=list)
+    taints: list[str] = Field(default_factory=list,
+                              description="Union of the taints of the signals behind it.")
     created_at: float
     updated_at: float
 
@@ -219,7 +269,7 @@ class KnowledgeResponse(BaseModel):
 
 class AssociateRequest(BaseModel):
     query: str
-    scope: str | None = None
+    scope: Scopes = Field(None, description=_SCOPE_HELP)
     top_k: int = Field(5, ge=1, le=50)
     hops: int = Field(1, ge=0, le=1, description="1 follows declared relations.")
     as_of_basis: Literal["ingest", "event"] = Field(
@@ -303,6 +353,7 @@ class ClaimOut(BaseModel):
     sources: list[str] = Field(default_factory=list)
     evidence_signal_ids: list[str] = Field(default_factory=list)
     scope: str | None = None
+    taints: list[str] = Field(default_factory=list)
     event_time: float = 0.0
     ingest_time: float = 0.0
     created_at: float = 0.0
@@ -313,6 +364,9 @@ class SignalOut(BaseModel):
     content: str
     source: str
     scope: str
+    source_record_id: str | None = None
+    actor: dict = Field(default_factory=dict)
+    taints: list[str] = Field(default_factory=list)
     created_at: float = 0.0
     occurred_at: float = 0.0
 
@@ -328,6 +382,9 @@ class SignalRecordResponse(BaseModel):
     canonical_id: str | None = Field(None, description="The duplicate cluster's representative.")
     context: str | None = None
     context_parent: str | None = None
+    source_record_id: str | None = None
+    actor: dict = Field(default_factory=dict)
+    taints: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict,
                            description="As deposited, plus once resolved: `subjects` (what it "
                                        "is about), `associations` (related knowledge it "
@@ -373,6 +430,48 @@ class DossierResponse(BaseModel):
         False, description="True when claims_anonymization hides raw signals.")
 
 
+# ── forget (erasure) ─────────────────────────────────────────────────────────
+
+class ForgetRequest(BaseModel):
+    """What to erase. Give at least one selector; they add up."""
+    entity: str | None = Field(
+        None, description="A subject to erase entirely (entity id or name, resolved "
+                          "like `know`): its beliefs, the claims about it or pointing at "
+                          "it, and every raw signal that cites it or names it.")
+    entity_type: str | None = Field(None, description="Narrows how `entity` is resolved.")
+    source_record_ids: list[str] = Field(
+        default_factory=list,
+        description="Erase the signals deposited with these `source_record_id`s, e.g. "
+                    "after the record was deleted in its source system.")
+    signal_ids: list[str] = Field(default_factory=list,
+                                  description="Erase these signals (ids from `remember`).")
+    reason: str | None = Field(
+        None, description="Kept with the tombstone, e.g. 'GDPR Art. 17 request #123'. "
+                          "Do not put personal data here.")
+
+
+class ForgetResponse(BaseModel):
+    """The erasure report: what was removed and which beliefs changed. Kept as
+    a tombstone without personal data (counts and signal ids only)."""
+    erasure_id: str
+    reason: str | None = None
+    entity_found: bool = False
+    signals_matched_by_name: int = Field(
+        0, description="Signals deleted because their text contains the name, whether or "
+                       "not memory made the name a subject.")
+    note: str | None = Field(None, description="Set when nothing matched.")
+    signals_deleted: int = 0
+    claims_deleted: int = 0
+    claims_updated: int = 0
+    etches_deleted: int = 0
+    etches_refolded: int = 0
+    versions_redacted: int = 0
+    versions_deleted: int = 0
+    refold: Literal["done", "pending", "none"] = Field(
+        "none", description="'pending' = beliefs that lost evidence are blanked now and "
+                            "re-consolidated on the next worker tick.")
+
+
 # ── stats / health ───────────────────────────────────────────────────────────
 
 class StatsResponse(BaseModel):
@@ -400,3 +499,5 @@ class HealthResponse(BaseModel):
     etch_model: str
     worker_enabled: bool
     claims_anonymization: bool = False
+    database: str = "duckdb"
+    auth: bool = False
