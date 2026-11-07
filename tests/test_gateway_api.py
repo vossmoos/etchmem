@@ -1,7 +1,7 @@
 """
 Offline tests for what a gateway in front of etchmem relies on: the API key,
-the /v1 paths, deposit metadata (source record, actor, taints) and how taints
-travel into beliefs, reads over several scopes, and erasure (`forget`).
+the /v1 paths, deposit metadata (source record, actor), reads over several
+scopes, and erasure (`forget`).
 
 No network, no LLM key. Runs on DuckDB, or on Postgres with
 ETCHMEM_TEST_DATABASE_URL set (see conftest.py).
@@ -93,31 +93,28 @@ def test_v1_and_legacy_paths_answer_the_same():
     assert client.get("/v1/health").json()["database"] in ("duckdb", "postgres")
 
 
-# ── deposit metadata and taints ──────────────────────────────────────────────
+# ── deposit metadata ─────────────────────────────────────────────────────────
 
-def test_metadata_is_recorded_and_taints_reach_claims_and_beliefs():
+def test_metadata_is_recorded_and_beliefs_carry_no_labels():
     svc = _svc()
     sid = _deposit(svc, "Acme/company|contact_email|cfo@acme.example #1",
                    source_record_id="zendesk:ticket:7",
-                   actor={"agent": "support-bot", "user": "anna@acme.com"},
-                   taints=["pii", "pii", " finance "])
+                   actor={"agent": "support-bot", "user": "anna@acme.com"})
     _deposit(svc, "Acme/company|contact_email|cfo@acme.example #2", source="mail")
     svc.sleep()
 
     rec = svc.signal(sid)
     assert rec.source_record_id == "zendesk:ticket:7"
     assert rec.actor == {"agent": "support-bot", "user": "anna@acme.com"}
-    assert rec.taints == ["finance", "pii"]
-    assert {t for c in rec.claims for t in c.taints} == {"finance", "pii"}
-
-    belief = svc.know("Acme").etches[0]
-    assert belief.taints == ["finance", "pii"]           # union over its claims
-    hit = next(r for r in svc.recall("Acme contact email", include_signals=False))
-    assert hit.taints == ["finance", "pii"]
+    assert "taints" not in rec.model_dump()
 
     client = TestClient(app_main.app)
     listed = client.get("/v1/etches").json()["etches"][0]
-    assert listed["taints"] == ["finance", "pii"]
+    assert "taints" not in listed and listed["source"] == "crm, mail"
+    # a client still sending the old field is accepted, and the field is ignored
+    r = client.post("/v1/remember", json={"data": "Acme/company|tier|gold", "source": "x",
+                                          "scope": "sales", "taints": ["pii"]})
+    assert r.status_code == 202
 
 
 # ── several scopes ───────────────────────────────────────────────────────────
@@ -169,7 +166,7 @@ def test_the_same_fact_in_two_scopes_stays_two_beliefs():
 def test_forget_a_source_record_refolds_what_remains_and_blanks_history():
     svc = _svc()
     erased = _deposit(svc, "Acme/company|tier|gold #from-ticket",
-                      source="zendesk", source_record_id="zendesk:ticket:7", taints=["pii"])
+                      source="zendesk", source_record_id="zendesk:ticket:7")
     svc.sleep()
     _deposit(svc, "Acme/company|tier|gold #from-crm", source="crm")
     svc.sleep()
@@ -185,7 +182,6 @@ def test_forget_a_source_record_refolds_what_remains_and_blanks_history():
     assert svc.signal(erased) is None
     head = svc.know("Acme").etches[0]
     assert head.current_value == "gold"                  # still held, by the CRM signal
-    assert head.taints == []                             # the tainted evidence is gone
     claim = svc.dossier(etch_id).claims[0]
     assert erased not in claim.evidence_signal_ids and claim.sources == ["crm"]
     versions = svc.history(etch_id)

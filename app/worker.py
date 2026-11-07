@@ -252,8 +252,6 @@ class Pipeline:
             members = self._s.left.signals_with_canonical(rep.id)
             sources = sorted({m.source for m in members})
             evidence_ids = sorted({m.id for m in members})
-            # Every claim inherits the sensitivity of the signals behind it.
-            taints = sorted({t for m in members for t in (m.taints or [])})
 
             kept = []
             for j, ec in enumerate(result.claims):
@@ -287,7 +285,7 @@ class Pipeline:
                     continue
                 for entity in subjects:
                     self._write_claim(ec, entity, rep, sources, evidence_ids,
-                                      now, summary, taints)
+                                      now, summary)
                     touched.append(entity.id)
             if resolution is not None:
                 for r in resolution.subjects:
@@ -549,8 +547,7 @@ class Pipeline:
             return None          # several identifiers in one value: no safe edge
         return self._entities.resolve(ec.value, rel_type, scope)
 
-    def _write_claim(self, ec, entity, rep, sources, evidence_ids, now, summary,
-                     taints: list[str] | None = None) -> None:
+    def _write_claim(self, ec, entity, rep, sources, evidence_ids, now, summary) -> None:
         display_name, value = entity.name, ec.value
         obj = self._resolve_object(ec, rep.scope)
         if settings.claims_anonymization:
@@ -595,7 +592,6 @@ class Pipeline:
             status=C_NEW,
             created_at=now,
             updated_at=now,
-            taints=list(taints or []),
         )
         self._s.left.upsert_claim(claim)
         summary.claims_written += 1
@@ -685,7 +681,6 @@ class Pipeline:
                 embedding=self._embed.embed_one(narrative),
                 value_entity_id=value_entity_id, details=details,
                 evidence=evidence, values=values,
-                taints=sorted({t for c in claims for t in c.taints}),
             )
             self._s.right.upsert_etch(etch)
 
@@ -743,7 +738,6 @@ class Pipeline:
         evidence = sorted({sid for c in newer for sid in c.evidence_signal_ids})
         sources = sorted({src for c in newer for src in c.sources})
         when = max((c.event_time for c in newer), default=time.time())
-        taints = sorted({t for c in newer for t in c.taints})
         touched: list[tuple[str, str]] = []
         for other in others.values():
             for etch in right.etches_for_entity(other.id, scope=scope):
@@ -769,7 +763,7 @@ class Pipeline:
                     evidence_signal_ids=evidence, corroboration_count=len(evidence),
                     confidence=max(c.confidence for c in newer),
                     value_entity_id=ref.value_entity_id, scope=etch.scope, status=C_NEW,
-                    created_at=now, updated_at=now, taints=taints))
+                    created_at=now, updated_at=now))
                 summary.reverse_retired += 1
                 touched.append((other.id, etch.property))
         return touched

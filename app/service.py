@@ -21,6 +21,7 @@ from app.config import settings
 from app.embeddings import EmbeddingProvider, build_embedder
 from app.hashing import content_hash
 from app.quotes import QuoteRequest, quotes_for
+from app.text import normalize_value
 from app.schemas import (
     AssociateNode, AssociateResponse, ClaimOut, DossierResponse, EdgeOut,
     EtchListResponse, KnowledgeResponse, EntityOut, EtchOut, ListedEtchOut, Quote, RecallResult,
@@ -78,6 +79,21 @@ def _readable(source: str | None, writers: list[str] | None) -> bool:
     return _writers_of(source) <= set(writers)
 
 
+def _reduce(belief, shown: set[str]) -> None:
+    """A belief seen through some of its writers only (see MemoryService._views): keep
+    the value those writers state, drop what other writers added (wording, evidence,
+    other values, their names)."""
+    value = belief.current_value if hasattr(belief, "current_value") else belief.value
+    plain = f"{belief.entity_name} — {(belief.property or '').replace('_', ' ')}: {value}."
+    belief.source = ", ".join(sorted(shown))
+    belief.details, belief.evidence, belief.values = [], None, []
+    if hasattr(belief, "narrative"):
+        belief.narrative = plain
+        belief.claim_ids, belief.source_ids = [], []
+    else:
+        belief.content = plain
+
+
 def _etch_out(e: Etch, **override) -> EtchOut:
     fields = dict(
         id=e.id, entity_name=e.entity_name, property=e.property,
@@ -85,7 +101,7 @@ def _etch_out(e: Etch, **override) -> EtchOut:
         narrative=e.narrative, version=e.version, scope=e.scope, source=e.source,
         value_entity_id=e.value_entity_id, details=e.details,
         evidence=e.evidence or None, values=e.values,
-        claim_ids=e.claim_ids, source_ids=e.source_ids, taints=e.taints,
+        claim_ids=e.claim_ids, source_ids=e.source_ids,
         created_at=e.created_at, updated_at=e.updated_at)
     fields.update(override)
     return EtchOut(**fields)
@@ -97,7 +113,7 @@ def _claim_out(c) -> ClaimOut:
         value=c.value, polarity=c.polarity, detail=c.detail,
         corroboration_count=c.corroboration_count, confidence=c.confidence,
         sources=c.sources, evidence_signal_ids=c.evidence_signal_ids,
-        scope=c.scope, taints=c.taints, event_time=c.event_time,
+        scope=c.scope, event_time=c.event_time,
         ingest_time=c.ingest_time, created_at=c.created_at)
 
 
@@ -140,7 +156,7 @@ class MemoryService:
 
     def remember(self, data, source, scope, extract_mode="deferred",
                  metadata=None, occurred_at=None, context=None, context_parent=None,
-                 source_record_id=None, actor=None, taints=None):
+                 source_record_id=None, actor=None):
         """Deposit a raw signal.
 
         `occurred_at` declares when the content actually happened (ISO-8601 or
@@ -153,17 +169,24 @@ class MemoryService:
         channel, a ticket's comments, a meeting), as the client addresses it. The
         same words said in another conversation are another signal.
 
-        `source_record_id`, `actor` and `taints` are recorded as given:
-        where the signal came from in its source system, who deposited it, and
-        how sensitive it is. Taints travel to every claim and belief built from it.
+        `source_record_id` and `actor` are recorded as given: where the signal
+        came from in its source system, and who deposited it.
 
         Returns (signal_id, stored, occurred_at) where occurred_at is 0.0 when
         nothing parseable was declared. A signal that was erased before is not
         stored again (`was_erased` tells it apart from a duplicate).
+
+        A signal's identity is its writer plus its text: the same words deposited
+        again by the same writer are a duplicate, but two writers depositing the same
+        words (two agents shown the same ticket) are two signals, each in its writer's
+        memory. Ids from before 0.4 had no writer in them; an erasure recorded under
+        such an id still refuses the text.
         """
-        sig_id = content_hash(data if not context else f"{context}\n{data}")
-        if self.stores.right.is_erased(sig_id):
-            return sig_id, False, parse_timestamp(occurred_at) or 0.0
+        payload = data if not context else f"{context}\n{data}"
+        sig_id = content_hash(f"{source}\x00{payload}")
+        for erased_id in (sig_id, content_hash(payload)):
+            if self.stores.right.is_erased(erased_id):
+                return erased_id, False, parse_timestamp(occurred_at) or 0.0
         now = time.time()
         ttl = settings.signal_ttl_seconds
         declared = parse_timestamp(occurred_at) or 0.0
@@ -175,7 +198,6 @@ class MemoryService:
             status=S_NEW, extract_mode=extract_mode, canonical_id=None,
             context_id=context or None, context_parent=context_parent or None,
             source_record_id=source_record_id or None, actor=dict(actor or {}),
-            taints=sorted({str(t).strip() for t in (taints or []) if str(t).strip()}),
         )
         stored = self.stores.left.add_signal(sig)
         return sig_id, stored, declared
@@ -201,8 +223,14 @@ class MemoryService:
         results: dict[str, RecallResult] = {}
         # With a writer filter, rank a wider pool so filtered-out beliefs do not eat top_k.
         pool = top_k if writers is None else min(top_k * 5, 200)
-        hits = [h for h in self.stores.right.search_etches(qvec, top_k=pool, scope=scope)
-                if _readable(h.row.get("source"), writers)][:top_k]
+        candidates = self.stores.right.search_etches(qvec, top_k=pool, scope=scope)
+        partial = [] if writers is None else [
+            e for e in (self.stores.right.get_etch(h.id) for h in candidates
+                        if not _readable(h.row.get("source"), writers)
+                        and _writers_of(h.row.get("source")) & set(writers)) if e is not None]
+        views = self._views(partial, writers)
+        hits = [h for h in candidates
+                if _readable(h.row.get("source"), writers) or h.id in views][:top_k]
         for h in hits:
             content, status, value, confidence, version = (
                 h.content, h.row["status"], h.row["current_value"],
@@ -233,11 +261,12 @@ class MemoryService:
                 value=value, status=status, confidence=confidence, version=version,
                 scope=h.row.get("scope"), source=h.row.get("source"),
                 details=details, evidence=evidence, values=values,
-                taints=h.row.get("taints") or [],
                 created_at=h.row.get("created_at", 0.0), updated_at=updated_at)
+            if h.id in views:
+                _reduce(results[h.id], views[h.id])
 
         self._attach_quotes(list(results.values()), as_of_ts, as_of_basis,
-                            full=quotes == "full")
+                            full=quotes == "full", writers=writers)
 
         if include_signals and as_of_ts is None:
             for h in self.stores.left.search_signals(qvec, top_k=top_k, scope=scope, source=source):
@@ -247,7 +276,6 @@ class MemoryService:
                     id=h.id, content=h.content,
                     score=settings.recall_signal_weight * h.similarity, origin="signal",
                     source=h.row.get("source"), scope=h.row.get("scope"),
-                    taints=h.row.get("taints") or [],
                     created_at=h.row.get("created_at", 0.0))
 
         return sorted(results.values(), key=lambda r: r.score, reverse=True)[:top_k]
@@ -298,7 +326,8 @@ class MemoryService:
             # Filter by writer, then page: totals count only what the reader may see.
             allowed = _as_list(writers) or []
             every, _ = self.stores.right.list_etches(**filters, limit=ETCHES_MAX_LIMIT * 10, offset=0)
-            every = [(e, t) for e, t in every if _readable(e.source, allowed)]
+            views = self._views([e for e, _ in every if not _readable(e.source, allowed)], allowed)
+            every = [(e, t) for e, t in every if _readable(e.source, allowed) or e.id in views]
             total, rows = len(every), every[offset:offset + limit]
         out = [ListedEtchOut(
             id=e.id, entity_name=e.entity_name, entity_type=etype, property=e.property,
@@ -306,8 +335,12 @@ class MemoryService:
             narrative=e.narrative, version=e.version, scope=e.scope, source=e.source,
             value_entity_id=e.value_entity_id, details=e.details,
             evidence=e.evidence or None, values=e.values,
-            claim_ids=e.claim_ids, source_ids=e.source_ids, taints=e.taints,
+            claim_ids=e.claim_ids, source_ids=e.source_ids,
             created_at=e.created_at, updated_at=e.updated_at) for e, etype in rows]
+        if writers is not None:
+            for item in out:
+                if item.id in views:
+                    _reduce(item, views[item.id])
         return EtchListResponse(etches=out, count=len(out), total=total,
                                 limit=limit, offset=offset)
 
@@ -334,9 +367,10 @@ class MemoryService:
         out: list[EtchOut] = []
         contested = 0
         writers = _as_list(writers) if writers is not None else None
-        beliefs = [e for subj in subjects
-                   for e in self.stores.right.etches_for_entity(subj.id, scope=_scopes(scope))
-                   if _readable(e.source, writers)]
+        held = [e for subj in subjects
+                for e in self.stores.right.etches_for_entity(subj.id, scope=_scopes(scope))]
+        views = self._views([e for e in held if not _readable(e.source, writers)], writers)
+        beliefs = [e for e in held if _readable(e.source, writers) or e.id in views]
         for e in beliefs:
             value, status, confidence, version = (
                 e.current_value, e.status, e.confidence, e.version)
@@ -359,8 +393,10 @@ class MemoryService:
                 e, current_value=value, status=status, confidence=confidence,
                 narrative=narrative, version=version, details=details,
                 evidence=evidence, values=values, updated_at=updated_at))
+            if e.id in views:
+                _reduce(out[-1], views[e.id])
         self._attach_quotes(out, as_of_ts, as_of_basis, full=quotes == "full",
-                            claim_ids={e.id: e.claim_ids for e in beliefs})
+                            claim_ids={e.id: e.claim_ids for e in beliefs}, writers=writers)
         return KnowledgeResponse(
             entity=EntityOut(id=entity.id, name=entity.name, type=entity.type,
                              aliases=entity.aliases, scope=entity.scope),
@@ -369,7 +405,7 @@ class MemoryService:
 
     def _attach_quotes(self, beliefs: list, as_of_ts: float | None, as_of_basis: str,
                        claim_ids: dict[str, list[str]] | None = None,
-                       full: bool = True) -> None:
+                       full: bool = True, writers: list[str] | None = None) -> None:
         """Set `quote` on each belief (EtchOut or etch RecallResult) in place:
         a reference with the source excerpt, or (`full=False`) with the excerpt
         only where the belief has no wording."""
@@ -386,10 +422,32 @@ class MemoryService:
             claim_ids=claim_ids.get(b.id, []), has_wording=bool(b.details))
             for b in beliefs]
         found = quotes_for(self.stores, requests, as_of=as_of_ts,
-                           as_of_basis=as_of_basis, full=full)
+                           as_of_basis=as_of_basis, full=full, writers=writers)
         for b in beliefs:
             if b.id in found:
                 b.quote = Quote(**found[b.id])
+
+    def _views(self, etches: list[Etch], writers: list[str] | None) -> dict[str, set[str]]:
+        """For beliefs NOT all of whose writers are allowed: which allowed writers state
+        their current value. A belief is shown (reduced to that value) only if some allowed
+        writer states it itself, e.g. two agents shown the same ticket each see it, while
+        a belief that only another agent's notes support stays hidden."""
+        if writers is None or not etches:
+            return {}
+        allowed = set(writers)
+        claims = {c.id: c for c in self.stores.left.claims_by_ids(
+            sorted({cid for e in etches for cid in e.claim_ids}))}
+        out: dict[str, set[str]] = {}
+        for e in etches:
+            wanted = {normalize_value(v) for v in e.current_value.split(", ")}
+            wanted.add(normalize_value(e.current_value))
+            backers = {src for cid in e.claim_ids
+                       if (c := claims.get(cid)) is not None and c.polarity == "asserted"
+                       and (c.value_norm in wanted or normalize_value(c.value) in wanted)
+                       for src in c.sources}
+            if backers & allowed:
+                out[e.id] = backers & allowed
+        return out
 
     def _resolve_ref(self, ref: str, entity_type: str | None, scope=None):
         """An entity id, or a surface name resolved the way ingestion resolved it."""
@@ -405,7 +463,7 @@ class MemoryService:
         if found is not None:
             return [found] if _in_scope(found.scope, scope) else []
         from app.ext import load_extensions
-        from app.text import normalize_entity_name
+        from app.text import normalize_entity_name, normalize_value
         registry = load_extensions()
         # Try the declared identifier first, then the plain normalized name, so
         # "MSM 0808" finds the entity that ingestion keyed as "msm-0808".
@@ -540,7 +598,7 @@ class MemoryService:
             signals = [
                 SignalOut(id=s.id, content=s.content, source=s.source,
                           scope=s.scope, source_record_id=s.source_record_id,
-                          actor=s.actor, taints=s.taints, created_at=s.created_at,
+                          actor=s.actor, created_at=s.created_at,
                           occurred_at=s.event_at)
                 for s in self.stores.left.signals_by_ids(list(sig_ids))]
         return DossierResponse(etch=etch, versions=versions, claims=claims,
@@ -558,7 +616,7 @@ class MemoryService:
             id=sig.id, content=None if hidden else sig.content, source=sig.source,
             scope=sig.scope, status=sig.status, canonical_id=sig.canonical_id,
             context=sig.context_id, context_parent=sig.context_parent,
-            source_record_id=sig.source_record_id, actor=sig.actor, taints=sig.taints,
+            source_record_id=sig.source_record_id, actor=sig.actor,
             metadata=sig.metadata or {}, created_at=sig.created_at,
             occurred_at=sig.event_at, claims=claims)
 
@@ -649,8 +707,7 @@ class MemoryService:
             # signal came from (their signals may have expired by TTL).
             sources = sorted({s.source for s in kept}
                              | {src for src in c.sources if src not in doomed_sources})
-            taints = sorted({t for s in kept for t in s.taints})
-            left.replace_claim_evidence(c.id, remaining, sources, taints)
+            left.replace_claim_evidence(c.id, remaining, sources)
             report.claims_updated += 1
         report.claims_deleted = left.delete_claims(sorted(delete_claims))
         report.signals_deleted = left.delete_signals(sorted(doomed))
@@ -673,7 +730,6 @@ class MemoryService:
                 head.embedding = None            # out of recall until re-folded
                 head.claim_ids = [c.id for c in remaining]
                 head.source_ids = sorted({sid for c in remaining for sid in c.evidence_signal_ids})
-                head.taints = sorted({t for c in remaining for t in c.taints})
                 right.upsert_etch(head)
                 report.etches_refolded += 1
             left.set_claims_status([c.id for c in remaining], C_NEW)

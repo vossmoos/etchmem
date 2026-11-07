@@ -61,7 +61,7 @@ def excerpt(text: str, anchors: list[str], limit: int) -> str:
 
 def quotes_for(stores: Stores, requests: list[QuoteRequest], *,
                as_of: float | None = None, as_of_basis: str = "ingest",
-               full: bool = True) -> dict[str, dict]:
+               full: bool = True, writers: list[str] | None = None) -> dict[str, dict]:
     """etch id → quote (a dict shaped like schemas.Quote), for beliefs that have one."""
     limit = settings.quote_chars
     if limit <= 0 or not requests:
@@ -85,7 +85,8 @@ def quotes_for(stores: Stores, requests: list[QuoteRequest], *,
     anonymous = settings.claims_anonymization
     out: dict[str, dict] = {}
     for r in requests:
-        candidates = [signals[sid] for sid in chosen[r.etch_id] if sid in signals]
+        candidates = [signals[sid] for sid in chosen[r.etch_id] if sid in signals
+                      and (writers is None or signals[sid].source in writers)]
         if as_of is not None:
             candidates = [s for s in candidates if when(s) <= as_of]
         if not candidates:
